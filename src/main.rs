@@ -21,7 +21,6 @@ use app::AppState;
 use audio::{run_mpv_actor, MpvCommand, MpvSupervisor};
 use event::AppEvent;
 use keymap::{KeyChord, KeyMap, KeySequenceStateMachine};
-use library::Scanner;
 use terminal::TerminalHarness;
 use ui::{render_app, Theme};
 
@@ -78,20 +77,17 @@ async fn main() -> Result<()> {
         }
     });
 
-    // 5. Start background library scanner
-    Scanner::scan_directory_in_background(music_dir.clone(), event_tx.clone());
-
-    // 6. Setup RAII Terminal Harness (with crash recovery)
+    // 5. Setup RAII Terminal Harness (with crash recovery)
     let mut harness = TerminalHarness::init(crash_file)?;
     let terminal = harness.terminal_mut();
 
-    // 7. Initialize Application State & Keymap
+    // 6. Initialize Application State & Keymap
     let mut app = AppState::new(music_dir, cmd_tx);
     let keymap = KeyMap::default();
     let mut key_state_machine = KeySequenceStateMachine::new();
     let theme = Theme::catppuccin_mocha();
 
-    // 8. Event Loop Setup
+    // 7. Event Loop Setup
     let mut reader = EventStream::new();
     let mut ticker = interval(Duration::from_millis(250));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -101,7 +97,7 @@ async fn main() -> Result<()> {
     // Initial draw
     terminal.draw(|f| render_app(f, &mut app, &theme))?;
 
-    // 9. Central Reactive Event Loop (Zero CPU when idle)
+    // 8. Central Reactive Event Loop (Zero CPU when idle)
     while app.is_running {
         if should_render {
             terminal.draw(|f| render_app(f, &mut app, &theme))?;
@@ -132,15 +128,11 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Branch 2: Domain Events (mpv IPC, Scanner batches)
+            // Branch 2: Domain Events (mpv IPC events)
             Some(domain_event) = event_rx.recv() => {
                 match domain_event {
                     AppEvent::Mpv(mpv_ev) => {
                         app.handle_mpv_event(mpv_ev);
-                        should_render = true;
-                    }
-                    AppEvent::Scanner(scan_ev) => {
-                        app.handle_scanner_event(scan_ev);
                         should_render = true;
                     }
                     _ => {}
@@ -150,7 +142,6 @@ async fn main() -> Result<()> {
                 while let Ok(pending) = event_rx.try_recv() {
                     match pending {
                         AppEvent::Mpv(mpv_ev) => app.handle_mpv_event(mpv_ev),
-                        AppEvent::Scanner(scan_ev) => app.handle_scanner_event(scan_ev),
                         _ => {}
                     }
                 }

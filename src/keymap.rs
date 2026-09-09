@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use crate::action::{Action, ViewId};
+use crate::action::Action;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeyChord {
@@ -34,11 +34,6 @@ impl KeyMap {
             mappings: HashMap::new(),
         };
 
-        // Number keys for View switching (cmus style)
-        map.bind_simple(KeyCode::Char('1'), Action::SwitchView(ViewId::Library));
-        map.bind_simple(KeyCode::Char('2'), Action::SwitchView(ViewId::FileBrowser));
-        map.bind_simple(KeyCode::Char('3'), Action::SwitchView(ViewId::Queue));
-
         // Navigation (Vim motions)
         map.bind_simple(KeyCode::Char('j'), Action::MoveDown(1));
         map.bind_simple(KeyCode::Down, Action::MoveDown(1));
@@ -46,34 +41,39 @@ impl KeyMap {
         map.bind_simple(KeyCode::Up, Action::MoveUp(1));
         map.bind_chord(vec![KeyCode::Char('g'), KeyCode::Char('g')], Action::MoveToTop);
         map.bind_simple(KeyCode::Char('G'), Action::MoveToBottom);
-        map.bind_simple(KeyCode::Tab, Action::TogglePane);
 
         // Page navigation
         map.bind_simple(KeyCode::Char('d'), Action::HalfPageDown);
         map.bind_simple(KeyCode::Char('u'), Action::HalfPageUp);
 
-        // Playback controls (cmus & standard media shortcuts)
+        // Directory Navigation
         map.bind_simple(KeyCode::Enter, Action::PlaySelected);
+        map.bind_simple(KeyCode::Backspace, Action::GoToParentDirectory);
+
+        // Playback controls
         map.bind_simple(KeyCode::Char('c'), Action::TogglePause);
         map.bind_simple(KeyCode::Char(' '), Action::TogglePause);
         map.bind_simple(KeyCode::Char('v'), Action::Stop);
         map.bind_simple(KeyCode::Char('b'), Action::NextTrack);
         map.bind_simple(KeyCode::Char('z'), Action::PrevTrack);
-        map.bind_simple(KeyCode::Char('a'), Action::EnqueueSelected);
 
-        // Seeking (Right / Left arrow or h / l)
+        // Seeking (Right / Left arrow)
         map.bind_simple(KeyCode::Right, Action::Seek(5));
-        map.bind_simple(KeyCode::Char('l'), Action::Seek(5));
         map.bind_simple(KeyCode::Left, Action::Seek(-5));
-        map.bind_simple(KeyCode::Char('h'), Action::Seek(-5));
 
         // Volume (+ / -)
         map.bind_simple(KeyCode::Char('+'), Action::VolumeDelta(5));
         map.bind_simple(KeyCode::Char('='), Action::VolumeDelta(5));
         map.bind_simple(KeyCode::Char('-'), Action::VolumeDelta(-5));
 
-        // App controls
-        map.bind_simple(KeyCode::Char('r'), Action::RefreshLibrary);
+        // Playback Modes: Loop & Shuffle
+        map.bind_simple(KeyCode::Char('m'), Action::CycleLoopMode);
+        map.bind_simple(KeyCode::Char('s'), Action::ToggleShuffle);
+
+        // Directory & UI
+        map.bind_simple(KeyCode::Char('r'), Action::ReloadDirectory);
+        map.bind_simple(KeyCode::Char('?'), Action::ToggleHelp);
+        map.bind_simple(KeyCode::Esc, Action::CloseTopWindow);
         map.bind_simple(KeyCode::Char('q'), Action::Quit);
 
         map

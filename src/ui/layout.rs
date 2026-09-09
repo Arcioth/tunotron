@@ -2,18 +2,18 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Gauge, Paragraph, Tabs},
+    widgets::{Block, BorderType, Borders, Cell, Gauge, Paragraph, Row, Table},
     Frame,
 };
-use crate::action::ViewId;
 use crate::app::AppState;
+use crate::library::BrowserEntry;
 use crate::ui::theme::Theme;
-use crate::ui::views::View;
+use crate::ui::window::render_help_modal;
 
 pub fn render_app(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
     let size = frame.area();
 
-    // Divide screen into 3 vertical chunks: Top bar (3), Main view (min 0), Bottom Player Bar (4)
+    // Divide screen into 3 vertical chunks: Top bar (3), Main folder browser (min 5), Bottom Player Bar (4)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -24,54 +24,132 @@ pub fn render_app(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         .split(size);
 
     render_header(frame, chunks[0], state, theme);
-    render_main_view(frame, chunks[1], state, theme);
+    render_browser_table(frame, chunks[1], state, theme);
     render_player_bar(frame, chunks[2], state, theme);
+
+    // Floating Window Layer: Render modal on top if active
+    if state.show_help {
+        render_help_modal(frame, size, theme);
+    }
 }
 
 fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let titles = vec![
-        " 1: Library ",
-        " 2: Browser ",
-        " 3: Queue ",
-    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .title(" 🎵 TUNOTRON ");
 
-    let selected_index = match state.active_view {
-        ViewId::Library => 0,
-        ViewId::FileBrowser => 1,
-        ViewId::Queue => 2,
-    };
+    let current_path_str = state.current_dir.to_string_lossy();
+    let header_line = Line::from(vec![
+        Span::styled(" Folder: ", Style::default().fg(theme.secondary)),
+        Span::styled(current_path_str, Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)),
+        Span::raw("   "),
+        Span::styled("[?: Help] ", Style::default().fg(theme.accent)),
+        Span::styled("[r: Reload] ", Style::default().fg(theme.accent)),
+        Span::styled("[m: Loop] ", Style::default().fg(theme.accent)),
+        Span::styled("[s: Shuffle]", Style::default().fg(theme.accent)),
+    ]);
 
-    let tabs = Tabs::new(titles)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(theme.border))
-                .title(" 🎵 TUNOTRON "),
-        )
-        .select(selected_index)
-        .style(Style::default().fg(theme.secondary))
-        .highlight_style(
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    frame.render_widget(tabs, area);
+    let paragraph = Paragraph::new(header_line).block(block);
+    frame.render_widget(paragraph, area);
 }
 
-fn render_main_view(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
-    match state.active_view {
-        ViewId::Library => {
-            state.views.library.render(frame, area, theme, true);
-        }
-        ViewId::FileBrowser => {
-            state.views.browser.render(frame, area, theme, true);
-        }
-        ViewId::Queue => {
-            state.views.queue.render(frame, area, theme, true);
-        }
+fn render_browser_table(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent))
+        .title(format!(" Music Browser ({} items) ", state.browser_items.len()));
+
+    if state.browser_items.is_empty() {
+        let empty_row = Row::new(vec![Cell::from("Empty directory. Press Backspace to go to parent folder.")]);
+        let table = Table::new(vec![empty_row], [Constraint::Percentage(100)]).block(block);
+        frame.render_widget(table, area);
+        return;
     }
+
+    let header_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+
+    let header = Row::new(vec![
+        Cell::from("Status"),
+        Cell::from("Name / Title"),
+        Cell::from("Artist"),
+        Cell::from("Duration"),
+    ])
+    .style(header_style)
+    .bottom_margin(1);
+
+    let current_playing_path = state.playback.current_track.as_ref().map(|t| &t.path);
+
+    let rows: Vec<Row> = state
+        .browser_items
+        .iter()
+        .map(|entry| {
+            match entry {
+                BrowserEntry::ParentDir(_) => {
+                    Row::new(vec![
+                        Cell::from(" ⬆ "),
+                        Cell::from(".. (Parent Directory)"),
+                        Cell::from(""),
+                        Cell::from(""),
+                    ])
+                    .style(Style::default().fg(theme.secondary))
+                }
+                BrowserEntry::Directory { name, .. } => {
+                    Row::new(vec![
+                        Cell::from(" 📁"),
+                        Cell::from(format!("{}/", name)),
+                        Cell::from("<Folder>"),
+                        Cell::from(""),
+                    ])
+                    .style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
+                }
+                BrowserEntry::AudioTrack(track) => {
+                    let is_active_track = current_playing_path.map_or(false, |p| p == &track.path);
+                    let (status_icon, track_style) = if is_active_track {
+                        if state.playback.is_playing {
+                            (" ▶ ", Style::default().fg(theme.gauge_fill).add_modifier(Modifier::BOLD))
+                        } else {
+                            (" ⏸ ", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
+                        }
+                    } else {
+                        (" 🎵", Style::default().fg(theme.fg))
+                    };
+
+                    Row::new(vec![
+                        Cell::from(status_icon),
+                        Cell::from(track.title.clone()),
+                        Cell::from(track.artist.clone()),
+                        Cell::from(track.formatted_duration()),
+                    ])
+                    .style(track_style)
+                }
+            }
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(7),
+        Constraint::Percentage(48),
+        Constraint::Percentage(33),
+        Constraint::Length(10),
+    ];
+
+    let highlight_style = Style::default()
+        .bg(theme.selection_bg)
+        .fg(theme.selection_fg)
+        .add_modifier(Modifier::BOLD);
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(block)
+        .row_highlight_style(highlight_style)
+        .highlight_symbol("▶ ");
+
+    frame.render_stateful_widget(table, area, &mut state.table_state);
 }
 
 fn render_player_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
@@ -93,7 +171,7 @@ fn render_player_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
         .constraints([Constraint::Length(1), Constraint::Length(1)])
         .split(inner);
 
-    // Row 1: Status Icon + Title + Artist + Volume
+    // Row 1: Status Icon + Title + Artist + Loop/Shuffle + Volume
     let status_icon = if state.playback.is_playing {
         Span::styled(" ▶ PLAYING ", Style::default().fg(theme.gauge_fill).add_modifier(Modifier::BOLD))
     } else if state.playback.is_paused {
@@ -105,15 +183,21 @@ fn render_player_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
     let track_info = if let Some(track) = &state.playback.current_track {
         format!("{} — {}", track.artist, track.title)
     } else {
-        "No track playing. Select a track and press Enter.".to_string()
+        "No track playing. Select an audio file and press Enter.".to_string()
     };
 
+    let loop_mode_str = format!("[Loop: {}]", state.playback.loop_mode.display_str());
+    let shuffle_str = format!("[Shuffle: {}]", state.playback.shuffle_mode.display_str());
     let vol_text = format!("Vol: {:>3.0}%", state.playback.volume);
 
     let row1 = Line::from(vec![
         status_icon,
         Span::raw(" "),
         Span::styled(track_info, Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)),
+        Span::raw(" | "),
+        Span::styled(loop_mode_str, Style::default().fg(theme.accent)),
+        Span::raw(" "),
+        Span::styled(shuffle_str, Style::default().fg(theme.accent)),
         Span::raw(" | "),
         Span::styled(vol_text, Style::default().fg(theme.secondary)),
     ]);

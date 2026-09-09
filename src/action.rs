@@ -1,10 +1,52 @@
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ViewId {
-    Library = 1,
-    FileBrowser = 2,
-    Queue = 3,
+pub enum LoopMode {
+    Off,
+    Track,
+    All,
+}
+
+impl LoopMode {
+    pub fn next(&self) -> Self {
+        match self {
+            LoopMode::Off => LoopMode::Track,
+            LoopMode::Track => LoopMode::All,
+            LoopMode::All => LoopMode::Off,
+        }
+    }
+
+    pub fn display_str(&self) -> &'static str {
+        match self {
+            LoopMode::Off => "Off",
+            LoopMode::Track => "Track",
+            LoopMode::All => "All",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ShuffleMode {
+    Off,
+    On,
+}
+
+impl ShuffleMode {
+    pub fn toggle(&self) -> Self {
+        match self {
+            ShuffleMode::Off => ShuffleMode::On,
+            ShuffleMode::On => ShuffleMode::Off,
+        }
+    }
+
+    pub fn display_str(&self) -> &'static str {
+        match self {
+            ShuffleMode::Off => "Off",
+            ShuffleMode::On => "On",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -16,11 +58,6 @@ pub enum Action {
     MoveToBottom,
     HalfPageDown,
     HalfPageUp,
-    TogglePane,
-
-    // Views
-    SwitchView(ViewId),
-    PreviousView,
 
     // Playback
     PlaySelected,
@@ -32,11 +69,18 @@ pub enum Action {
     Seek(i64),         // delta in seconds (+5, -5)
     VolumeDelta(i8),   // delta in percent (+5, -5)
     SetVolume(f64),
-    EnqueueSelected,
-    RemoveFromQueue(usize),
-    ClearQueue,
+    CycleLoopMode,
+    ToggleShuffle,
+
+    // Directory & Filesystem
+    EnterDirectory,
+    GoToParentDirectory,
+    ReloadDirectory,
+
+    // Windows & UI
+    ToggleHelp,
+    CloseTopWindow,
 
     // Application
-    RefreshLibrary,
     Quit,
 }

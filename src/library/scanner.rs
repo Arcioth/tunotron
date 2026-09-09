@@ -11,6 +11,7 @@ use crate::event::{AppEvent, ScannerEvent};
 
 pub struct Scanner;
 
+#[allow(dead_code)]
 impl Scanner {
     pub fn scan_directory_in_background(
         dir: PathBuf,
@@ -29,7 +30,7 @@ impl Scanner {
                 let path = entry.path();
                 if path.is_file() && Track::is_audio_file(path) {
                     current_id += 1;
-                    let track = Self::read_metadata(current_id, path);
+                    let track = Self::read_metadata_sync(current_id, path);
                     batch.push(track.clone());
                     tracks.push(track);
 
@@ -49,7 +50,7 @@ impl Scanner {
         });
     }
 
-    fn read_metadata(id: usize, path: &Path) -> Track {
+    pub fn read_metadata_sync(id: usize, path: &Path) -> Track {
         let mut track = Track::new(id, path.to_path_buf());
 
         if let Ok(tagged_file) = Probe::open(path).and_then(|p| p.read()) {
