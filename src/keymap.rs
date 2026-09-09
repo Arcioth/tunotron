@@ -71,6 +71,8 @@ impl KeyMap {
         map.bind_simple(KeyCode::Char('s'), Action::ToggleShuffle);
 
         // Directory & UI
+        map.bind_simple(KeyCode::Char('.'), Action::LocatePlayingTrack);
+        map.bind_simple(KeyCode::Char('Z'), Action::ToggleDensity);
         map.bind_simple(KeyCode::Char('r'), Action::ReloadDirectory);
         map.bind_simple(KeyCode::Char('?'), Action::ToggleHelp);
         map.bind_simple(KeyCode::Esc, Action::CloseTopWindow);

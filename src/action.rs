@@ -67,6 +67,7 @@ pub enum Action {
     NextTrack,
     PrevTrack,
     Seek(i64),         // delta in seconds (+5, -5)
+    SeekRatio(f64),    // 0.0 to 1.0 (from mouse click on seekbar)
     VolumeDelta(i8),   // delta in percent (+5, -5)
     SetVolume(f64),
     CycleLoopMode,
@@ -76,10 +77,16 @@ pub enum Action {
     EnterDirectory,
     GoToParentDirectory,
     ReloadDirectory,
+    LocatePlayingTrack,
+    SelectIndex(usize),
 
     // Windows & UI
     ToggleHelp,
     CloseTopWindow,
+    ToggleDensity,
+
+    // Dynamic Extension Actions
+    Custom(String),
 
     // Application
     Quit,

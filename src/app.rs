@@ -1,10 +1,26 @@
 use std::path::PathBuf;
+use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 use tokio::sync::mpsc;
 
 use crate::action::{Action, LoopMode, ShuffleMode};
 use crate::audio::{MpvCommand, MpvEvent};
 use crate::library::{read_directory, BrowserEntry, Track};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewDensity {
+    Comfortable,
+    Compact,
+}
+
+impl ViewDensity {
+    pub fn toggle(&self) -> Self {
+        match self {
+            ViewDensity::Comfortable => ViewDensity::Compact,
+            ViewDensity::Compact => ViewDensity::Comfortable,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct PlaybackState {
@@ -35,30 +51,41 @@ impl Default for PlaybackState {
 
 pub struct AppState {
     pub is_running: bool,
+    pub music_root: PathBuf,
     pub current_dir: PathBuf,
     pub browser_items: Vec<BrowserEntry>,
     pub table_state: TableState,
     pub active_playlist: Vec<Track>,
     pub active_playlist_index: Option<usize>,
     pub active_playlist_dir: Option<PathBuf>,
+    pub shuffle_deck: Vec<usize>,
     pub playback: PlaybackState,
     pub cmd_tx: mpsc::UnboundedSender<MpvCommand>,
     pub show_help: bool,
+    pub density: ViewDensity,
+    pub browser_rect: Rect,
+    pub progress_rect: Rect,
 }
 
 impl AppState {
     pub fn new(music_dir: PathBuf, cmd_tx: mpsc::UnboundedSender<MpvCommand>) -> Self {
+        let canonical_root = music_dir.canonicalize().unwrap_or(music_dir);
         let mut state = Self {
             is_running: true,
-            current_dir: music_dir.clone(),
+            music_root: canonical_root.clone(),
+            current_dir: canonical_root,
             browser_items: Vec::new(),
             table_state: TableState::default(),
             active_playlist: Vec::new(),
             active_playlist_index: None,
             active_playlist_dir: None,
+            shuffle_deck: Vec::new(),
             playback: PlaybackState::default(),
             cmd_tx,
             show_help: false,
+            density: ViewDensity::Comfortable,
+            browser_rect: Rect::default(),
+            progress_rect: Rect::default(),
         };
 
         state.reload_current_directory();
@@ -74,7 +101,7 @@ impl AppState {
     }
 
     pub fn reload_current_directory(&mut self) {
-        let items = read_directory(&self.current_dir);
+        let items = read_directory(&self.current_dir, &self.music_root);
         let old_selected = self.table_state.selected().unwrap_or(0);
         self.browser_items = items;
 
@@ -114,16 +141,35 @@ impl AppState {
             Action::CloseTopWindow => {
                 self.show_help = false;
             }
+            Action::ToggleDensity => {
+                self.density = self.density.toggle();
+            }
             Action::ReloadDirectory => {
                 self.reload_current_directory();
             }
+
+            // Jailed navigation: cannot navigate higher than music_root
             Action::GoToParentDirectory => {
-                if let Some(parent) = self.current_dir.parent().map(|p| p.to_path_buf()) {
-                    self.current_dir = parent;
-                    self.reload_current_directory();
-                    self.table_state.select(Some(0));
+                if self.current_dir != self.music_root && self.current_dir.starts_with(&self.music_root) {
+                    if let Some(parent) = self.current_dir.parent().map(|p| p.to_path_buf()) {
+                        self.current_dir = parent;
+                        self.reload_current_directory();
+                        self.table_state.select(Some(0));
+                    }
                 }
             }
+
+            // Locate currently playing song
+            Action::LocatePlayingTrack => {
+                self.locate_playing_track();
+            }
+
+            Action::SelectIndex(idx) => {
+                if idx < self.browser_items.len() {
+                    self.table_state.select(Some(idx));
+                }
+            }
+
             Action::EnterDirectory | Action::PlaySelected => {
                 self.enter_selected();
             }
@@ -133,7 +179,7 @@ impl AppState {
                 }
             }
 
-            // --- Robust Pause & Resume (Fixes Spacebar Bug) ---
+            // Robust Pause & Resume
             Action::TogglePause => {
                 if self.playback.is_playing {
                     self.playback.is_playing = false;
@@ -146,7 +192,6 @@ impl AppState {
                 } else if let Some(track) = &self.playback.current_track {
                     self.play_track(track.clone());
                 } else {
-                    // Try to play first track in view
                     self.play_first_audio_in_current_folder();
                 }
             }
@@ -168,6 +213,15 @@ impl AppState {
                     relative: true,
                 });
             }
+            Action::SeekRatio(ratio) => {
+                let clamped = ratio.clamp(0.0, 1.0);
+                let target_sec = clamped * self.playback.duration_sec;
+                let _ = self.cmd_tx.send(MpvCommand::Seek {
+                    seconds: target_sec,
+                    relative: false,
+                });
+                self.playback.current_time_sec = target_sec;
+            }
             Action::VolumeDelta(delta_pct) => {
                 let new_vol = (self.playback.volume + delta_pct as f64).clamp(0.0, 100.0);
                 self.playback.volume = new_vol;
@@ -183,6 +237,9 @@ impl AppState {
             }
             Action::ToggleShuffle => {
                 self.playback.shuffle_mode = self.playback.shuffle_mode.toggle();
+                if self.playback.shuffle_mode == ShuffleMode::On {
+                    self.reset_shuffle_deck();
+                }
             }
 
             // Motions
@@ -223,6 +280,9 @@ impl AppState {
                 let prev = current.saturating_sub(15);
                 self.table_state.select(Some(prev));
             }
+
+            // Extension custom hook
+            Action::Custom(_) => {}
         }
     }
 
@@ -232,9 +292,12 @@ impl AppState {
             if let Some(entry) = self.browser_items.get(idx).cloned() {
                 match entry {
                     BrowserEntry::ParentDir(parent_path) => {
-                        self.current_dir = parent_path;
-                        self.reload_current_directory();
-                        self.table_state.select(Some(0));
+                        // Enforce jail boundary
+                        if parent_path.starts_with(&self.music_root) || parent_path == self.music_root {
+                            self.current_dir = parent_path;
+                            self.reload_current_directory();
+                            self.table_state.select(Some(0));
+                        }
                     }
                     BrowserEntry::Directory { path, .. } => {
                         self.current_dir = path;
@@ -242,9 +305,26 @@ impl AppState {
                         self.table_state.select(Some(0));
                     }
                     BrowserEntry::AudioTrack(track) => {
-                        // The entire folder becomes the Active Playlist!
                         self.set_folder_as_active_playlist(&track);
                     }
+                }
+            }
+        }
+    }
+
+    pub fn locate_playing_track(&mut self) {
+        if let Some(track) = &self.playback.current_track {
+            let track_path = track.path.clone();
+            if let Some(folder) = track_path.parent() {
+                // If we are in a different folder, jump to the track's folder first
+                if self.current_dir != folder {
+                    self.current_dir = folder.to_path_buf();
+                    self.reload_current_directory();
+                }
+
+                // Locate and highlight the track row
+                if let Some(pos) = self.browser_items.iter().position(|e| e.path() == &track_path) {
+                    self.table_state.select(Some(pos));
                 }
             }
         }
@@ -262,6 +342,10 @@ impl AppState {
         self.active_playlist = tracks;
         self.active_playlist_index = Some(start_idx);
         self.active_playlist_dir = Some(self.current_dir.clone());
+
+        if self.playback.shuffle_mode == ShuffleMode::On {
+            self.reset_shuffle_deck();
+        }
 
         self.play_track(starting_track.clone());
     }
@@ -300,6 +384,26 @@ impl AppState {
         });
     }
 
+    /// Generates a non-repeating Fisher-Yates shuffle deck
+    fn reset_shuffle_deck(&mut self) {
+        let total = self.active_playlist.len();
+        if total <= 1 {
+            self.shuffle_deck.clear();
+            return;
+        }
+
+        let current = self.active_playlist_index.unwrap_or(0);
+        let mut deck: Vec<usize> = (0..total).filter(|&i| i != current).collect();
+
+        // Fisher-Yates Shuffle
+        for i in (1..deck.len()).rev() {
+            let j = pseudo_random(i + 1);
+            deck.swap(i, j);
+        }
+
+        self.shuffle_deck = deck;
+    }
+
     pub fn advance_track(&mut self, is_auto_eof: bool) {
         if self.active_playlist.is_empty() {
             return;
@@ -313,20 +417,16 @@ impl AppState {
             }
         }
 
-        // Shuffle Mode
+        // Shuffle Mode (Fisher-Yates Deck: never plays the same ending song, never repeats until full deck played)
         if self.playback.shuffle_mode == ShuffleMode::On {
-            let total = self.active_playlist.len();
-            if total > 1 {
-                let current = self.active_playlist_index.unwrap_or(0);
-                let mut next = pseudo_random(total);
-                if next == current {
-                    next = (next + 1) % total;
-                }
-                self.play_playlist_index(next);
-            } else {
-                self.play_playlist_index(0);
+            if self.shuffle_deck.is_empty() {
+                self.reset_shuffle_deck();
             }
-            return;
+
+            if let Some(next_idx) = self.shuffle_deck.pop() {
+                self.play_playlist_index(next_idx);
+                return;
+            }
         }
 
         // Linear advance
@@ -359,7 +459,7 @@ impl AppState {
             return;
         }
 
-        // If more than 3 seconds into track, restart from beginning
+        // If more than 3 seconds into track, restart from 0:00
         if self.playback.current_time_sec > 3.0 {
             let _ = self.cmd_tx.send(MpvCommand::Seek {
                 seconds: 0.0,
@@ -414,7 +514,6 @@ impl AppState {
                 self.playback.is_paused = false;
             }
             MpvEvent::EndFile { reason, .. } => {
-                // Strict EOF Guard: Only trigger automatic next track when reason == "eof"
                 if reason.as_deref() == Some("eof") {
                     self.advance_track(true);
                 }
@@ -429,6 +528,9 @@ impl AppState {
 }
 
 fn pseudo_random(max: usize) -> usize {
+    if max <= 1 {
+        return 0;
+    }
     use std::time::SystemTime;
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)

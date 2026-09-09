@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Cell, Gauge, Paragraph, Row, Table},
     Frame,
 };
-use crate::app::AppState;
+use crate::app::{AppState, ViewDensity};
 use crate::library::BrowserEntry;
 use crate::ui::theme::Theme;
 use crate::ui::window::render_help_modal;
@@ -13,7 +13,6 @@ use crate::ui::window::render_help_modal;
 pub fn render_app(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
     let size = frame.area();
 
-    // Divide screen into 3 vertical chunks: Top bar (3), Main folder browser (min 5), Bottom Player Bar (4)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -23,11 +22,14 @@ pub fn render_app(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         ])
         .split(size);
 
+    // Save hitboxes for mouse clicks
+    state.browser_rect = chunks[1];
+
     render_header(frame, chunks[0], state, theme);
     render_browser_table(frame, chunks[1], state, theme);
     render_player_bar(frame, chunks[2], state, theme);
 
-    // Floating Window Layer: Render modal on top if active
+    // Floating Window Layer
     if state.show_help {
         render_help_modal(frame, size, theme);
     }
@@ -41,12 +43,18 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
         .title(" 🎵 TUNOTRON ");
 
     let current_path_str = state.current_dir.to_string_lossy();
+    let density_label = match state.density {
+        ViewDensity::Comfortable => "Normal",
+        ViewDensity::Compact => "Compact",
+    };
+
     let header_line = Line::from(vec![
         Span::styled(" Folder: ", Style::default().fg(theme.secondary)),
         Span::styled(current_path_str, Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)),
         Span::raw("   "),
         Span::styled("[?: Help] ", Style::default().fg(theme.accent)),
-        Span::styled("[r: Reload] ", Style::default().fg(theme.accent)),
+        Span::styled("[.: Locate] ", Style::default().fg(theme.accent)),
+        Span::styled(format!("[Z: {}] ", density_label), Style::default().fg(theme.accent)),
         Span::styled("[m: Loop] ", Style::default().fg(theme.accent)),
         Span::styled("[s: Shuffle]", Style::default().fg(theme.accent)),
     ]);
@@ -63,7 +71,7 @@ fn render_browser_table(frame: &mut Frame, area: Rect, state: &mut AppState, the
         .title(format!(" Music Browser ({} items) ", state.browser_items.len()));
 
     if state.browser_items.is_empty() {
-        let empty_row = Row::new(vec![Cell::from("Empty directory. Press Backspace to go to parent folder.")]);
+        let empty_row = Row::new(vec![Cell::from("Empty directory. (Jailed to music root)")]);
         let table = Table::new(vec![empty_row], [Constraint::Percentage(100)]).block(block);
         frame.render_widget(table, area);
         return;
@@ -74,13 +82,13 @@ fn render_browser_table(frame: &mut Frame, area: Rect, state: &mut AppState, the
         .add_modifier(Modifier::BOLD);
 
     let header = Row::new(vec![
-        Cell::from("Status"),
-        Cell::from("Name / Title"),
+        Cell::from(""),
+        Cell::from("Title / Filename"),
         Cell::from("Artist"),
         Cell::from("Duration"),
     ])
     .style(header_style)
-    .bottom_margin(1);
+    .bottom_margin(if state.density == ViewDensity::Compact { 0 } else { 1 });
 
     let current_playing_path = state.playback.current_track.as_ref().map(|t| &t.path);
 
@@ -132,8 +140,8 @@ fn render_browser_table(frame: &mut Frame, area: Rect, state: &mut AppState, the
         .collect();
 
     let widths = [
-        Constraint::Length(7),
-        Constraint::Percentage(48),
+        Constraint::Length(5),
+        Constraint::Percentage(50),
         Constraint::Percentage(33),
         Constraint::Length(10),
     ];
@@ -152,7 +160,7 @@ fn render_browser_table(frame: &mut Frame, area: Rect, state: &mut AppState, the
     frame.render_stateful_widget(table, area, &mut state.table_state);
 }
 
-fn render_player_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+fn render_player_bar(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -170,6 +178,9 @@ fn render_player_bar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Length(1)])
         .split(inner);
+
+    // Save progress bar hitbox for mouse clicks
+    state.progress_rect = sub_chunks[1];
 
     // Row 1: Status Icon + Title + Artist + Loop/Shuffle + Volume
     let status_icon = if state.playback.is_playing {

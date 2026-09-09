@@ -28,11 +28,14 @@ impl BrowserEntry {
     }
 }
 
-pub fn read_directory(dir: &Path) -> Vec<BrowserEntry> {
+pub fn read_directory(dir: &Path, root_boundary: &Path) -> Vec<BrowserEntry> {
     let mut items = Vec::new();
 
-    if let Some(parent) = dir.parent() {
-        items.push(BrowserEntry::ParentDir(parent.to_path_buf()));
+    // Only allow navigating up if we are strictly inside a subdirectory of the music root
+    if dir != root_boundary && dir.starts_with(root_boundary) {
+        if let Some(parent) = dir.parent() {
+            items.push(BrowserEntry::ParentDir(parent.to_path_buf()));
+        }
     }
 
     if let Ok(entries) = fs::read_dir(dir) {

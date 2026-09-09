@@ -10,13 +10,14 @@ mod ui;
 use std::path::PathBuf;
 use std::time::Duration;
 use anyhow::Result;
-use crossterm::event::{Event as CrosstermEvent, EventStream, KeyEventKind};
+use crossterm::event::{Event as CrosstermEvent, EventStream, KeyEventKind, MouseButton, MouseEventKind};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio::time::{interval, MissedTickBehavior};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+use action::Action;
 use app::AppState;
 use audio::{run_mpv_actor, MpvCommand, MpvSupervisor};
 use event::AppEvent;
@@ -105,7 +106,7 @@ async fn main() -> Result<()> {
         }
 
         tokio::select! {
-            // Branch 1: Terminal Stdin Input
+            // Branch 1: Terminal Stdin & Mouse Input
             maybe_evt = reader.next() => {
                 match maybe_evt {
                     Some(Ok(CrosstermEvent::Key(key))) => {
@@ -115,6 +116,44 @@ async fn main() -> Result<()> {
                                 app.handle_action(action);
                                 should_render = true;
                             }
+                        }
+                    }
+                    Some(Ok(CrosstermEvent::Mouse(mouse))) => {
+                        match mouse.kind {
+                            MouseEventKind::ScrollDown => {
+                                app.handle_action(Action::MoveDown(2));
+                                should_render = true;
+                            }
+                            MouseEventKind::ScrollUp => {
+                                app.handle_action(Action::MoveUp(2));
+                                should_render = true;
+                            }
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                let p_rect = app.progress_rect;
+                                if mouse.column >= p_rect.x
+                                    && mouse.column < p_rect.x + p_rect.width
+                                    && mouse.row >= p_rect.y
+                                    && mouse.row < p_rect.y + p_rect.height
+                                {
+                                    let relative_x = mouse.column.saturating_sub(p_rect.x) as f64;
+                                    let ratio = relative_x / (p_rect.width.max(1) as f64);
+                                    app.handle_action(Action::SeekRatio(ratio));
+                                    should_render = true;
+                                } else {
+                                    let b_rect = app.browser_rect;
+                                    let header_offset = if app.density == app::ViewDensity::Compact { 1 } else { 2 };
+                                    if mouse.column >= b_rect.x
+                                        && mouse.column < b_rect.x + b_rect.width
+                                        && mouse.row >= b_rect.y + header_offset
+                                        && mouse.row < b_rect.y + b_rect.height.saturating_sub(1)
+                                    {
+                                        let clicked_row = (mouse.row - b_rect.y - header_offset) as usize;
+                                        app.handle_action(Action::SelectIndex(clicked_row));
+                                        should_render = true;
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     Some(Ok(CrosstermEvent::Resize(_, _))) => {
