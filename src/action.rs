@@ -127,8 +127,15 @@ pub enum Capability {
     KeyBind,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ActionPermission {
+    Public,
+    Capability(Capability),
+    HostOnly,
+}
+
 impl Action {
-    pub fn required_capability(&self) -> Option<Capability> {
+    pub fn permission(&self) -> ActionPermission {
         match self {
             Action::TogglePause
             | Action::Stop
@@ -139,20 +146,20 @@ impl Action {
             | Action::VolumeDelta(_)
             | Action::SetVolume(_)
             | Action::CycleLoopMode
-            | Action::ToggleShuffle => Some(Capability::PlaybackControl),
+            | Action::ToggleShuffle => ActionPermission::Capability(Capability::PlaybackControl),
 
             Action::PlaySelected
-            | Action::PlayTrackIndex(_) => Some(Capability::PlaybackQueue),
+            | Action::PlayTrackIndex(_) => ActionPermission::Capability(Capability::PlaybackQueue),
 
             Action::EnterDirectory
             | Action::GoToParentDirectory
             | Action::ReloadDirectory
-            | Action::LocatePlayingTrack => Some(Capability::FsJailRead),
+            | Action::LocatePlayingTrack => ActionPermission::Capability(Capability::FsJailRead),
 
             Action::ToggleHelp
             | Action::OpenWindow(_)
             | Action::CloseTopWindow
-            | Action::ToggleDensity => Some(Capability::UiOverlay),
+            | Action::ToggleDensity => ActionPermission::Capability(Capability::UiOverlay),
 
             Action::MoveDown(_)
             | Action::MoveUp(_)
@@ -160,10 +167,18 @@ impl Action {
             | Action::MoveToBottom
             | Action::HalfPageDown
             | Action::HalfPageUp
-            | Action::SelectIndex(_) => None,
+            | Action::SelectIndex(_) => ActionPermission::Public,
 
-            Action::Plugin { .. } => None,
-            Action::Quit => None,
+            Action::Plugin { .. } => ActionPermission::Public,
+
+            Action::Quit => ActionPermission::HostOnly,
+        }
+    }
+
+    pub fn required_capability(&self) -> Option<Capability> {
+        match self.permission() {
+            ActionPermission::Capability(cap) => Some(cap),
+            _ => None,
         }
     }
 }
@@ -176,18 +191,16 @@ pub enum ActionSource {
 }
 
 impl ActionSource {
+    /// Evaluates if the action is permitted under this origin's granted capabilities.
+    /// Uses a strict DEFAULT-DENY policy for untrusted sources (plugins).
     pub fn is_permitted(&self, action: &Action, granted_caps: &[Capability]) -> bool {
         match self {
             ActionSource::User | ActionSource::Internal => true,
             ActionSource::Plugin(_) => {
-                // Plugins can never execute Action::Quit directly
-                if *action == Action::Quit {
-                    return false;
-                }
-                if let Some(required) = action.required_capability() {
-                    granted_caps.contains(&required)
-                } else {
-                    true
+                match action.permission() {
+                    ActionPermission::Public => true,
+                    ActionPermission::Capability(required) => granted_caps.contains(&required),
+                    ActionPermission::HostOnly => false,
                 }
             }
         }
@@ -236,7 +249,7 @@ mod tests {
         assert!(user.is_permitted(&Action::Quit, &[]));
         assert!(user.is_permitted(&Action::TogglePause, &[]));
 
-        // Plugin cannot Quit under any capability
+        // Plugin cannot Quit under any capability (HostOnly)
         assert!(!plugin.is_permitted(&Action::Quit, &[Capability::PlaybackControl]));
 
         // Plugin without capability cannot control playback
@@ -245,12 +258,15 @@ mod tests {
         // Plugin with capability can control playback
         assert!(plugin.is_permitted(&Action::TogglePause, &[Capability::PlaybackControl]));
 
-        // Plugin can perform inert UI motions without capabilities
+        // Plugin can perform inert UI motions without capabilities (Public)
         assert!(plugin.is_permitted(&Action::MoveDown(1), &[]));
     }
 
     #[test]
-    fn test_required_capabilities() {
+    fn test_action_permissions_default_deny() {
+        assert_eq!(Action::Quit.permission(), ActionPermission::HostOnly);
+        assert_eq!(Action::TogglePause.permission(), ActionPermission::Capability(Capability::PlaybackControl));
+        assert_eq!(Action::MoveDown(1).permission(), ActionPermission::Public);
         assert_eq!(Action::TogglePause.required_capability(), Some(Capability::PlaybackControl));
         assert_eq!(Action::PlaySelected.required_capability(), Some(Capability::PlaybackQueue));
         assert_eq!(Action::EnterDirectory.required_capability(), Some(Capability::FsJailRead));

@@ -1,9 +1,21 @@
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TrackId(pub u64);
+
+impl TrackId {
+    pub fn from_path(path: &Path) -> Self {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        path.hash(&mut hasher);
+        Self(hasher.finish())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
-    pub id: usize,
+    pub id: TrackId,
     pub path: PathBuf,
     pub filename: String,
     pub title: String,
@@ -15,7 +27,12 @@ pub struct Track {
 }
 
 impl Track {
-    pub fn new(id: usize, path: PathBuf) -> Self {
+    pub fn new(path: PathBuf) -> Self {
+        let id = TrackId::from_path(&path);
+        Self::with_id(id, path)
+    }
+
+    pub fn with_id(id: TrackId, path: PathBuf) -> Self {
         let filename = path
             .file_name()
             .map(|s| s.to_string_lossy().to_string())

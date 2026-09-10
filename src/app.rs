@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -6,7 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::action::{Action, LoopMode, ShuffleMode, WindowId};
 use crate::audio::{MpvCommand, MpvEvent};
-use crate::library::{read_directory, resolve_in_jail, BrowserEntry, Track};
+use crate::library::{read_directory, resolve_in_jail, BrowserEntry, LruCache, Track};
 use crate::ui::UiGeom;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,7 +186,7 @@ pub struct AppState {
     pub clock: PlaybackClock,
     pub last_rendered_sec: u64,
     pub browser_title: String,
-    pub metadata_cache: HashMap<PathBuf, crate::event::MetadataPatch>,
+    pub metadata_cache: LruCache<PathBuf, crate::event::MetadataPatch>,
     pub cmd_tx: mpsc::Sender<MpvCommand>,
     pub event_tx: mpsc::Sender<crate::event::AppEvent>,
     pub density: ViewDensity,
@@ -217,7 +216,7 @@ impl AppState {
             clock: PlaybackClock::new(),
             last_rendered_sec: 0,
             browser_title: " Music Browser (0 items) ".to_string(),
-            metadata_cache: HashMap::new(),
+            metadata_cache: LruCache::new(Self::METADATA_CACHE_CAP),
             cmd_tx,
             event_tx,
             density: ViewDensity::Comfortable,
@@ -287,12 +286,6 @@ impl AppState {
 
     pub fn apply_metadata_patches(&mut self, patches: Vec<crate::event::MetadataPatch>) {
         for patch in patches {
-            // Cap metadata cache at METADATA_CACHE_CAP (10,000 tracks)
-            if self.metadata_cache.len() >= Self::METADATA_CACHE_CAP {
-                if let Some(first_key) = self.metadata_cache.keys().next().cloned() {
-                    self.metadata_cache.remove(&first_key);
-                }
-            }
             self.metadata_cache.insert(patch.path.clone(), patch.clone());
 
             for item in &mut self.browser_items {
@@ -874,8 +867,8 @@ mod tests {
         let tmp = std::env::temp_dir();
         let mut app = AppState::new(tmp.clone(), cmd_tx, event_tx);
 
-        let t1 = Arc::new(Track::new(1, tmp.join("1.mp3")));
-        let t2 = Arc::new(Track::new(2, tmp.join("2.mp3")));
+        let t1 = Arc::new(Track::new(tmp.join("1.mp3")));
+        let t2 = Arc::new(Track::new(tmp.join("2.mp3")));
         app.active_playlist = vec![t1, t2];
         app.active_playlist_index = Some(0);
         app.playback.state = PlayState::Playing;
@@ -911,8 +904,8 @@ mod tests {
         let tmp = std::env::temp_dir();
         let mut app = AppState::new(tmp.clone(), cmd_tx, event_tx);
 
-        let t1 = Arc::new(Track::new(1, tmp.join("1.mp3")));
-        let t2 = Arc::new(Track::new(2, tmp.join("2.mp3")));
+        let t1 = Arc::new(Track::new(tmp.join("1.mp3")));
+        let t2 = Arc::new(Track::new(tmp.join("2.mp3")));
         app.active_playlist = vec![t1, t2];
         app.active_playlist_index = Some(0);
         app.playback.state = PlayState::Playing;
@@ -938,7 +931,7 @@ mod tests {
         let mut app = AppState::new(tmp.clone(), cmd_tx, event_tx);
 
         let p1 = tmp.join("song.mp3");
-        let t1 = Arc::new(Track::new(1, p1.clone()));
+        let t1 = Arc::new(Track::new(p1.clone()));
         app.browser_items = vec![BrowserEntry::AudioTrack(t1)];
 
         let patch = crate::event::MetadataPatch {
@@ -986,7 +979,7 @@ mod tests {
         );
 
         // Setting browser items with a known cached track populates it synchronously
-        let fresh_track = Arc::new(Track::new(1, p1.clone()));
+        let fresh_track = Arc::new(Track::new(p1.clone()));
         app.set_browser_items(vec![BrowserEntry::AudioTrack(fresh_track)]);
 
         if let BrowserEntry::AudioTrack(t) = &app.browser_items[0] {

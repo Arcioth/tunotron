@@ -74,7 +74,7 @@ pub fn read_directory(dir: &Path, root_boundary: &Path) -> Vec<BrowserEntry> {
                     dirs.push(BrowserEntry::Directory { name, path: jailed_dir });
                 }
             } else if ft.is_file() && Track::is_audio_file(&path) {
-                let track = Track::new(0, path);
+                let track = Track::new(path);
                 tracks.push(track);
             }
         }
@@ -94,11 +94,6 @@ pub fn read_directory(dir: &Path, root_boundary: &Path) -> Vec<BrowserEntry> {
                 _ => ascii_case_cmp(&a.filename, &b.filename),
             }
         });
-
-        // Assign sequential IDs after sorting so Track::id matches display order
-        for (i, track) in tracks.iter_mut().enumerate() {
-            track.id = i + 1;
-        }
 
         items.extend(dirs);
         for track in tracks {
