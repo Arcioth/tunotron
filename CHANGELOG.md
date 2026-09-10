@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.5] - 2026-09-10 — Custom Keybinding Registration & Declarative Floating Modals
+
+Following the plugin API expansion roadmap, this release establishes the first two foundational API pillars for Tunotron plugins: **Custom Keybinding Registration (`Capability::KeyBind`)** and **Declarative Floating Modals (`Capability::UiOverlay`)**. Plugins can now hook custom shortcuts and project rich floating TUI windows (e.g. lyrics viewers, track metadata inspectors) without leaking immediate-mode Ratatui frames or risking host security.
+
+### ⌨️ Pillar 1: Custom Keybinding Registration (`Capability::KeyBind`)
+- **Key Chord & Sequence Engine ([`src/keymap.rs`](file:///home/arcioth/Documents/tunotron/src/keymap.rs)):**
+  - Robust parser supporting single keys (`"y"`, `"space"`), function keys (`"F1"`-`"F12"`), modifier combinations (`"ctrl+y"`, `"alt+enter"`, `"ctrl+shift+tab"`), and Vim-style multi-key sequences (`"g g"`, `"ctrl+x,ctrl+s"`).
+  - Normalizes Shift on Char keys matching crossterm terminal semantics.
+- **Strict Host Reserved Keys & Collision Guards:**
+  - Reserved vital controls: plugins cannot hijack Quit (`q`/`Q`/`Ctrl+C`), Cancel/Close (`Esc`), or core file browser navigation (`j`, `k`, `↑`, `↓`, `G`, `gg`, `Enter`, `Backspace`).
+  - Pre-existing default key bindings are shielded from accidental hijacking.
+- **Declarative Manifest Declarations:**
+  - Lua scripts declare keybindings statically in their manifest: `keybinds = { ["i"] = "announce_current" }`.
+  - Registered bindings dispatch pure [`Action::Plugin`](file:///home/arcioth/Documents/tunotron/src/action.rs#L130) values through the state reducer, routing to `plugin.on_action(name, payload)`.
+
+### 🪟 Pillar 2: Declarative Floating Modals (`Capability::UiOverlay`)
+- **Typed Modal Action & Geometry ([`src/action.rs`](file:///home/arcioth/Documents/tunotron/src/action.rs#L124), [`src/ui/geom.rs`](file:///home/arcioth/Documents/tunotron/src/ui/geom.rs#L6-L20)):**
+  - Added [`Action::ShowModal { title, content }`](file:///home/arcioth/Documents/tunotron/src/action.rs#L124) permission-checked under `Capability::UiOverlay`.
+  - Added [`WindowId::PluginModal`](file:///home/arcioth/Documents/tunotron/src/action.rs#L84) to the pure `WindowStack` in [`UiGeom`](file:///home/arcioth/Documents/tunotron/src/ui/geom.rs#L15).
+  - Pop-up cleanup: popping the window cleans up modal state automatically.
+- **Pure Projection Compositor ([`src/ui/window.rs`](file:///home/arcioth/Documents/tunotron/src/ui/window.rs#L129), [`src/ui/layout.rs`](file:///home/arcioth/Documents/tunotron/src/ui/layout.rs#L39-L44)):**
+  - Renders rounded, themed popup windows with background clearing (`Clear`) and text wrapping (`Wrap { trim: true }`).
+  - Modal shielding: background clicks outside the modal dismiss it automatically; background widgets are shielded from click events while a modal is open.
+  - Keyboard dismissal: `Esc` closes the active modal instantly.
+- **Updated Reference Example ([`examples/plugins/track_announcer.lua`](file:///home/arcioth/Documents/tunotron/examples/plugins/track_announcer.lua)):**
+  - Pressing `i` invokes a floating "Track Metadata Inspector" showing title, artist, album, duration, and filepath.
+
+### 🧪 Automated Testing & Binary Footprint
+- **34 Passed Unit Tests, 0 Warnings (0.08s execution time):**
+  - Added tests for key chord parsing, sequences, reserved key blocking, capability rejection, modal permission checks, reducer modal state transitions, and Lua modal action emission.
+- **Release binary footprint:** **3.6 MB** with Fat LTO and stripped symbols.
+
+---
+
 ## [0.3.4] - 2026-09-10 — Sandboxed Lua 5.4 Extension Engine & Auto-Loader
 
 Following the plugin architecture roadmap, this release embeds a sandboxed, low-overhead Lua 5.4 scripting runtime (`mlua`) on top of the native plugin trait and capability manager. Users can now drop single-file scripts (`*.lua`) or modular directory packages (`<plugin>/init.lua`) into `~/.config/tunotron/plugins/` to react to playback events and emit capability-governed actions.

@@ -10,7 +10,7 @@ use crate::app::{AppState, ViewDensity};
 use crate::library::BrowserEntry;
 use crate::ui::geom::UiGeom;
 use crate::ui::theme::Theme;
-use crate::ui::window::render_help_modal;
+use crate::ui::window::{render_help_modal, render_plugin_modal};
 
 pub fn render_app(frame: &mut Frame, state: &AppState, geom: &mut UiGeom, theme: &Theme) {
     let size = frame.area();
@@ -36,6 +36,13 @@ pub fn render_app(frame: &mut Frame, state: &AppState, geom: &mut UiGeom, theme:
         match top_window {
             WindowId::Help => {
                 geom.modal_rect = render_help_modal(frame, size, theme);
+            }
+            WindowId::PluginModal => {
+                if let Some(content) = &geom.modal_content {
+                    geom.modal_rect = render_plugin_modal(frame, size, content, theme);
+                } else {
+                    geom.modal_rect = Rect::default();
+                }
             }
         }
     } else {

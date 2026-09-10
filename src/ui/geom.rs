@@ -2,6 +2,12 @@ use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 use crate::action::WindowId;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModalContent {
+    pub title: String,
+    pub content: String,
+}
+
 #[derive(Debug, Default)]
 pub struct UiGeom {
     pub table_state: TableState,
@@ -10,6 +16,7 @@ pub struct UiGeom {
     pub progress_rect: Rect,
     pub window_stack: Vec<WindowId>,
     pub modal_rect: Rect,
+    pub modal_content: Option<ModalContent>,
 }
 
 #[allow(dead_code)]
@@ -80,13 +87,22 @@ impl UiGeom {
         self.window_stack.push(id);
     }
 
+    pub fn open_modal(&mut self, title: String, content: String) {
+        self.modal_content = Some(ModalContent { title, content });
+        self.push_window(WindowId::PluginModal);
+    }
+
     pub fn pop_window(&mut self) -> Option<WindowId> {
-        self.window_stack.pop()
+        let popped = self.window_stack.pop();
+        if !self.window_stack.contains(&WindowId::PluginModal) {
+            self.modal_content = None;
+        }
+        popped
     }
 
     pub fn toggle_window(&mut self, id: WindowId) {
         if self.top_window() == Some(id) {
-            self.window_stack.pop();
+            self.pop_window();
         } else {
             self.push_window(id);
         }

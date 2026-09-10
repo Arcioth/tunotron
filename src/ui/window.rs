@@ -124,3 +124,31 @@ pub fn render_help_modal(frame: &mut Frame, area: Rect, theme: &Theme) -> Rect {
     frame.render_widget(paragraph, popup_area);
     popup_area
 }
+
+/// Renders a dynamic plugin floating modal window
+pub fn render_plugin_modal(
+    frame: &mut Frame,
+    area: Rect,
+    content: &crate::ui::geom::ModalContent,
+    theme: &Theme,
+) -> Rect {
+    let popup_area = centered_rect(65, 60, area);
+
+    // Clear background behind modal to prevent text bleed
+    frame.render_widget(Clear, popup_area);
+
+    let title_string = format!(" 💡 {} (Esc to close) ", content.title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent))
+        .title(title_string);
+
+    let paragraph = Paragraph::new(content.content.as_str())
+        .block(block)
+        .style(Style::default().fg(theme.fg))
+        .wrap(ratatui::widgets::Wrap { trim: true });
+
+    frame.render_widget(paragraph, popup_area);
+    popup_area
+}

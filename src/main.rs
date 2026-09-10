@@ -115,7 +115,8 @@ async fn main() -> Result<()> {
     let mut geom = UiGeom::new();
     geom.clamp_selection(app.browser_items.len());
 
-    let keymap = KeyMap::default();
+    let mut keymap = KeyMap::default();
+    keymap.register_plugin_bindings(&plugin_mgr);
     let mut key_state_machine = KeySequenceStateMachine::new();
     let theme = Theme::catppuccin_mocha();
 

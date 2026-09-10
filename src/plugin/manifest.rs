@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use crate::action::Capability;
 
@@ -8,6 +9,8 @@ pub struct PluginManifest {
     pub version: String,
     pub description: String,
     pub capabilities: Vec<Capability>,
+    #[serde(default)]
+    pub keybinds: HashMap<String, String>,
 }
 
 impl PluginManifest {
@@ -24,6 +27,12 @@ impl PluginManifest {
             version: version.into(),
             description: description.into(),
             capabilities,
+            keybinds: HashMap::new(),
         }
+    }
+
+    pub fn with_keybinds(mut self, keybinds: HashMap<String, String>) -> Self {
+        self.keybinds = keybinds;
+        self
     }
 }

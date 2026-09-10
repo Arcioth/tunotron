@@ -81,6 +81,7 @@ impl ShuffleMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WindowId {
     Help,
+    PluginModal,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -119,6 +120,10 @@ pub enum Action {
     OpenWindow(WindowId),
     CloseTopWindow,
     ToggleDensity,
+    ShowModal {
+        title: String,
+        content: String,
+    },
 
     // Dynamic Extension Actions
     Plugin {
@@ -202,7 +207,8 @@ impl Action {
             Action::ToggleHelp
             | Action::OpenWindow(_)
             | Action::CloseTopWindow
-            | Action::ToggleDensity => ActionPermission::Capability(Capability::UiOverlay),
+            | Action::ToggleDensity
+            | Action::ShowModal { .. } => ActionPermission::Capability(Capability::UiOverlay),
 
             Action::MoveDown(_)
             | Action::MoveUp(_)
@@ -315,5 +321,20 @@ mod tests {
         assert_eq!(Action::EnterDirectory.required_capability(), Some(Capability::FsJailRead));
         assert_eq!(Action::ToggleHelp.required_capability(), Some(Capability::UiOverlay));
         assert_eq!(Action::MoveDown(1).required_capability(), None);
+    }
+
+    #[test]
+    fn test_show_modal_capability_permission() {
+        let action = Action::ShowModal {
+            title: "Lyrics".to_string(),
+            content: "Hello world".to_string(),
+        };
+        assert_eq!(action.permission(), ActionPermission::Capability(Capability::UiOverlay));
+        assert_eq!(action.required_capability(), Some(Capability::UiOverlay));
+
+        let plugin = ActionSource::Plugin("com.test.lyrics".into());
+        assert!(!plugin.is_permitted(&action, &[]));
+        assert!(!plugin.is_permitted(&action, &[Capability::PlaybackControl]));
+        assert!(plugin.is_permitted(&action, &[Capability::UiOverlay]));
     }
 }

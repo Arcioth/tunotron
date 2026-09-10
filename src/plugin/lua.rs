@@ -57,7 +57,14 @@ impl LuaPlugin {
             }
         }
 
-        let manifest = PluginManifest::new(id, name, version, description, capabilities);
+        let mut keybinds = std::collections::HashMap::new();
+        if let Ok(keybinds_tbl) = manifest_tbl.get::<Table>("keybinds") {
+            for pair in keybinds_tbl.pairs::<String, String>().flatten() {
+                keybinds.insert(pair.0, pair.1);
+            }
+        }
+
+        let manifest = PluginManifest::new(id, name, version, description, capabilities).with_keybinds(keybinds);
 
         // Store plugin table in Lua registry so we can retrieve its callbacks
         let _ = lua.set_named_registry_value("__tunotron_plugin_table", plugin_tbl);
@@ -180,6 +187,7 @@ fn parse_single_action(val: &Value) -> Option<Action> {
             "LocatePlayingTrack" => Some(Action::LocatePlayingTrack),
             "PlaySelected" => Some(Action::PlaySelected),
             "EnterDirectory" => Some(Action::EnterDirectory),
+            "CloseModal" | "CloseTopWindow" => Some(Action::CloseTopWindow),
             "Quit" => Some(Action::Quit),
             _ => None,
         },
@@ -203,6 +211,12 @@ fn parse_table_action(tbl: &Table) -> Option<Action> {
         "LocatePlayingTrack" => Some(Action::LocatePlayingTrack),
         "PlaySelected" => Some(Action::PlaySelected),
         "EnterDirectory" => Some(Action::EnterDirectory),
+        "CloseModal" | "CloseTopWindow" => Some(Action::CloseTopWindow),
+        "ShowModal" => {
+            let title: String = tbl.get("title").unwrap_or_else(|_| "Notification".to_string());
+            let content: String = tbl.get("content").unwrap_or_default();
+            Some(Action::ShowModal { title, content })
+        }
         "Quit" => Some(Action::Quit),
         "Seek" => {
             let seconds: i64 = tbl.get("seconds").unwrap_or(0);
@@ -417,5 +431,57 @@ mod tests {
         let mut plugin = LuaPlugin::from_script(script, "oom.lua").unwrap();
         // Memory limit should prevent allocating ~1GB and safely fail without crashing host
         assert!(plugin.on_load().is_err());
+    }
+
+    #[test]
+    fn test_lua_plugin_keybinds_declaration() {
+        let script = r#"
+            local p = {}
+            p.manifest = {
+                id = "com.test.keybinds",
+                capabilities = { "KeyBind" },
+                keybinds = {
+                    ["y"] = "toggle_lyrics",
+                    ["ctrl+l"] = "show_log"
+                }
+            }
+            return p
+        "#;
+
+        let plugin = LuaPlugin::from_script(script, "keybinds.lua").unwrap();
+        assert_eq!(plugin.manifest().keybinds.get("y"), Some(&"toggle_lyrics".to_string()));
+        assert_eq!(plugin.manifest().keybinds.get("ctrl+l"), Some(&"show_log".to_string()));
+    }
+
+    #[test]
+    fn test_lua_plugin_emits_show_modal() {
+        let script = r#"
+            local p = {}
+            p.manifest = {
+                id = "com.test.modal",
+                capabilities = { "UiOverlay" }
+            }
+            function p.on_action(name, payload)
+                if name == "show_lyrics" then
+                    return {
+                        action = "ShowModal",
+                        title = "Song Lyrics",
+                        content = "Line 1\nLine 2"
+                    }
+                end
+                return nil
+            end
+            return p
+        "#;
+
+        let mut plugin = LuaPlugin::from_script(script, "modal.lua").unwrap();
+        let actions = plugin.on_action("show_lyrics", &serde_json::json!({}));
+        assert_eq!(
+            actions,
+            vec![Action::ShowModal {
+                title: "Song Lyrics".to_string(),
+                content: "Line 1\nLine 2".to_string(),
+            }]
+        );
     }
 }

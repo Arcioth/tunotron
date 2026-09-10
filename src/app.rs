@@ -368,6 +368,10 @@ impl AppState {
                     geom.pop_window();
                     return Vec::new();
                 }
+                Action::ShowModal { title, content } => {
+                    geom.open_modal(title, content);
+                    return Vec::new();
+                }
                 Action::Quit => {
                     self.is_running = false;
                     return vec![Effect::Mpv(MpvCommand::Quit)];
@@ -387,6 +391,10 @@ impl AppState {
             }
             Action::OpenWindow(id) => {
                 geom.push_window(id);
+                Vec::new()
+            }
+            Action::ShowModal { title, content } => {
+                geom.open_modal(title, content);
                 Vec::new()
             }
             Action::CloseTopWindow => {
@@ -1053,6 +1061,44 @@ mod tests {
         let paused_time = clock.now();
         std::thread::sleep(std::time::Duration::from_millis(10));
         assert_eq!(clock.now(), paused_time);
+    }
+
+    #[test]
+    fn test_show_modal_reducer() {
+        let (mut app, _) = AppState::new(PathBuf::from("/music"));
+        let mut geom = UiGeom::new();
+
+        assert!(!geom.has_window());
+        assert_eq!(geom.modal_content, None);
+
+        // ShowModal pushes PluginModal to window stack
+        let effects = app.reduce(
+            Action::ShowModal {
+                title: "Track Lyrics".to_string(),
+                content: "Verse 1\nChorus".to_string(),
+            },
+            &mut geom,
+        );
+        assert!(effects.is_empty());
+        assert!(geom.has_window());
+        assert_eq!(geom.top_window(), Some(WindowId::PluginModal));
+        assert_eq!(
+            geom.modal_content,
+            Some(crate::ui::geom::ModalContent {
+                title: "Track Lyrics".to_string(),
+                content: "Verse 1\nChorus".to_string(),
+            })
+        );
+
+        // While modal is open, normal navigation actions are consumed
+        let effects = app.reduce(Action::MoveDown(5), &mut geom);
+        assert!(effects.is_empty());
+
+        // CloseTopWindow closes the modal and cleans up modal_content
+        let effects = app.reduce(Action::CloseTopWindow, &mut geom);
+        assert!(effects.is_empty());
+        assert!(!geom.has_window());
+        assert_eq!(geom.modal_content, None);
     }
 }
 
