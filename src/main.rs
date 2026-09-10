@@ -376,7 +376,9 @@ fn execute_effects(
             Effect::PluginAction { plugin_id, name, payload } => {
                 let envelopes = plugin_mgr.dispatch_action(&plugin_id, &name, &payload);
                 for env in envelopes {
-                    let _ = event_tx.try_send(AppEvent::Action(env));
+                    if let Err(e) = event_tx.try_send(AppEvent::Action(env)) {
+                        tracing::warn!("Domain event channel full, plugin action dropped: {}", e);
+                    }
                 }
             }
             Effect::Notify { summary, body } => {

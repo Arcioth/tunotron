@@ -1,12 +1,20 @@
 use std::path::Path;
-use mlua::{Lua, LuaSerdeExt, Table, Value};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use mlua::{HookTriggers, Lua, LuaSerdeExt, Table, Value, VmState};
 use crate::action::{Action, Capability};
 use super::manifest::PluginManifest;
 use super::traits::{Plugin, PluginEvent};
 
+/// Maximum VM instructions allowed per callback (~1-2ms of CPU time).
+/// Prevents rogue or infinite-looping scripts from starving the Tokio reactor or freezing the UI.
+const MAX_INSTRUCTION_BUDGET: u32 = 250_000;
+const INSTRUCTION_CHECK_INTERVAL: u32 = 2_500;
+
 pub struct LuaPlugin {
-    manifest: PluginManifest,
+    pub manifest: PluginManifest,
     lua: Lua,
+    instruction_counter: Arc<AtomicU32>,
 }
 
 impl LuaPlugin {
@@ -31,17 +39,34 @@ impl LuaPlugin {
         let _ = lua.set_memory_limit(16 * 1024 * 1024);
         setup_sandbox(&lua)?;
 
-        // 2. Inject `tunotron` global host module
+        // 2. CPU instruction budget hook: abort any callback exceeding MAX_INSTRUCTION_BUDGET
+        let instruction_counter = Arc::new(AtomicU32::new(0));
+        let counter_for_hook = Arc::clone(&instruction_counter);
+
+        lua.set_hook(
+            HookTriggers::new().every_nth_instruction(INSTRUCTION_CHECK_INTERVAL),
+            move |_lua, _debug| {
+                if counter_for_hook.fetch_add(INSTRUCTION_CHECK_INTERVAL, Ordering::Relaxed) >= MAX_INSTRUCTION_BUDGET {
+                    return Err(mlua::Error::RuntimeError(
+                        "Script instruction budget exceeded: terminated to prevent CPU lockup".to_string(),
+                    ));
+                }
+                Ok(VmState::Continue)
+            },
+        );
+
+        // 3. Inject `tunotron` global host module
         setup_host_globals(&lua)?;
 
-        // 3. Load script chunk
+        // 4. Load script chunk (reset budget counter first)
+        instruction_counter.store(0, Ordering::Relaxed);
         let plugin_tbl: Table = lua
             .load(script)
             .set_name(chunk_name)
             .eval()
             .map_err(|e| format!("Error executing Lua script '{}': {}", chunk_name, e))?;
 
-        // 4. Extract manifest table
+        // 5. Extract manifest table
         let manifest_tbl: Table = plugin_tbl
             .get("manifest")
             .map_err(|e| format!("Plugin '{}' must export a 'manifest' table: {}", chunk_name, e))?;
@@ -53,6 +78,7 @@ impl LuaPlugin {
         let name: String = manifest_tbl.get("name").unwrap_or_else(|_| id.clone());
         let version: String = manifest_tbl.get("version").unwrap_or_else(|_| "0.1.0".to_string());
         let description: String = manifest_tbl.get("description").unwrap_or_default();
+        let api_version: Option<String> = manifest_tbl.get("api_version").ok();
 
         let mut capabilities = Vec::new();
         if let Ok(caps_tbl) = manifest_tbl.get::<Table>("capabilities") {
@@ -72,16 +98,23 @@ impl LuaPlugin {
             }
         }
 
-        let manifest = PluginManifest::new(id, name, version, description, capabilities).with_keybinds(keybinds);
+        let mut manifest = PluginManifest::new(id, name, version, description, capabilities).with_keybinds(keybinds);
+        if let Some(av) = api_version {
+            manifest = manifest.with_api_version(av);
+        }
 
-        // 5. Attach capability-gated host APIs (e.g. jailed filesystem reader, desktop notifications)
+        // 6. Attach capability-gated host APIs (e.g. jailed filesystem reader, desktop notifications)
         attach_jailed_fs_api(&lua, &manifest, music_root)?;
         attach_notify_api(&lua, &manifest)?;
 
         // Store plugin table in Lua registry so we can retrieve its callbacks
         let _ = lua.set_named_registry_value("__tunotron_plugin_table", plugin_tbl);
 
-        Ok(Self { manifest, lua })
+        Ok(Self {
+            manifest,
+            lua,
+            instruction_counter,
+        })
     }
 
     fn plugin_table(&self) -> Result<Table, String> {
@@ -415,6 +448,7 @@ impl Plugin for LuaPlugin {
     }
 
     fn on_load(&mut self) -> Result<(), String> {
+        self.instruction_counter.store(0, Ordering::Relaxed);
         let plugin_tbl = self.plugin_table()?;
         if let Ok(on_load_fn) = plugin_tbl.get::<mlua::Function>("on_load") {
             on_load_fn
@@ -425,6 +459,7 @@ impl Plugin for LuaPlugin {
     }
 
     fn on_event(&mut self, event: &PluginEvent) -> Vec<Action> {
+        self.instruction_counter.store(0, Ordering::Relaxed);
         let Ok(plugin_tbl) = self.plugin_table() else { return Vec::new(); };
 
         let mut actions = Vec::new();
@@ -471,6 +506,7 @@ impl Plugin for LuaPlugin {
     }
 
     fn on_action(&mut self, name: &str, payload: &serde_json::Value) -> Vec<Action> {
+        self.instruction_counter.store(0, Ordering::Relaxed);
         let Ok(plugin_tbl) = self.plugin_table() else { return Vec::new(); };
         let Ok(on_action_fn) = plugin_tbl.get::<mlua::Function>("on_action") else { return Vec::new(); };
 
@@ -486,6 +522,7 @@ impl Plugin for LuaPlugin {
     }
 
     fn on_unload(&mut self) {
+        self.instruction_counter.store(0, Ordering::Relaxed);
         if let Ok(plugin_tbl) = self.plugin_table() {
             if let Ok(on_unload_fn) = plugin_tbl.get::<mlua::Function>("on_unload") {
                 let _ = on_unload_fn.call::<()>(());
@@ -993,5 +1030,35 @@ mod tests {
             }
             other => panic!("Expected Action::Notify, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_lua_plugin_instruction_budget_terminates_infinite_loop() {
+        let script = r#"
+            local p = {}
+            p.manifest = {
+                id = "org.tunotron.rogueloop",
+                name = "Rogue Loop",
+                version = "0.1.0",
+                description = "Attempts infinite loop",
+                capabilities = {}
+            }
+            function p.on_action(name, payload)
+                -- Runaway loop: allocates 0 memory, but spins instructions endlessly
+                while true do end
+                return { action = "ToggleHelp" }
+            end
+            return p
+        "#;
+
+        let mut plugin = LuaPlugin::from_script(script, "rogue_loop.lua").unwrap();
+
+        let start = std::time::Instant::now();
+        let actions = plugin.on_action("hang", &serde_json::json!({}));
+        let elapsed = start.elapsed();
+
+        // Must abort without hanging (under 50ms) and return empty actions safely
+        assert!(elapsed < std::time::Duration::from_millis(50));
+        assert!(actions.is_empty(), "Aborted script must return no actions");
     }
 }

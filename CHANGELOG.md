@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.7] - 2026-09-11 — Sandboxing Hardening: CPU Instruction Budget & Cross-Plugin Isolation
+
+This release hardens the plugin sandbox against CPU starvation attacks, prevents cross-plugin action spoofing, and enhances host observability:
+
+### 🛡️ Sandboxing & Safety Enhancements
+- **Instruction Budget Hook ([`src/plugin/lua.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/lua.rs)):**
+  - Integrated Lua VM instruction hook checking every 2,500 instructions with a ceiling of 250,000 instructions (~1–2ms max CPU time per callback).
+  - Rogue plugins with infinite loops (`while true do end`) are cleanly terminated without stalling the Tokio reactor or freezing the Ratatui TUI.
+- **Cross-Plugin Spoofing Shield ([`src/action.rs`](file:///home/arcioth/Documents/tunotron/src/action.rs)):**
+  - Tightened [`ActionSource::is_permitted`](file:///home/arcioth/Documents/tunotron/src/action.rs#L260) to verify `caller_id == plugin_id` for `Action::Plugin`.
+  - Plugins can no longer forge or dispatch actions into sibling plugins' internal handler surfaces. User keybindings and internal routing remain unrestricted.
+- **Observability & Host Hygiene ([`src/plugin/manager.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/manager.rs), [`src/plugin/manifest.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/manifest.rs), [`src/main.rs`](file:///home/arcioth/Documents/tunotron/src/main.rs)):**
+  - Host logs plugin registration with name, id, version, and granted capabilities.
+  - Added `api_version` manifest field for future version negotiation.
+  - Domain event queue warns if channel buffer is exhausted under backpressure.
+
+---
+
 ## [0.3.6] - 2026-09-10 — Complete Extensibility Suite: Playback Heartbeats & Desktop Notifications
 
 This release completes the final two pillars of Tunotron's 5-pillar extension architecture: **1 Hz Monotonic Playback Heartbeat (`PluginEvent::Tick` / `on_tick`)** and **Desktop Notifications & Host Integration (`Capability::Notify`)**. Tunotron now provides a comprehensive, sandboxed plugin system with zero performance penalties, zero binary bloat, and rock-solid architectural boundaries.

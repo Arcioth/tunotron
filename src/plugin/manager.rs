@@ -20,7 +20,13 @@ impl PluginManager {
         }
 
         plugin.on_load()?;
-        tracing::info!("Registered plugin: [{}] {}", id, plugin.manifest().name);
+        tracing::info!(
+            "Registered plugin '{}' [{}] v{} (granted capabilities: {:?})",
+            plugin.manifest().name,
+            id,
+            plugin.manifest().version,
+            plugin.manifest().capabilities
+        );
         self.plugins.push(plugin);
         Ok(())
     }

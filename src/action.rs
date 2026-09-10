@@ -260,7 +260,15 @@ impl ActionSource {
     pub fn is_permitted(&self, action: &Action, granted_caps: &[Capability]) -> bool {
         match self {
             ActionSource::User | ActionSource::Internal => true,
-            ActionSource::Plugin(_) => {
+            ActionSource::Plugin(caller_id) => {
+                // Cross-plugin spoofing guard: a plugin cannot invoke another plugin's internal action surface!
+                // Real user keybindings (ActionSource::User) can invoke any plugin action, but a plugin can only target itself.
+                if let Action::Plugin { plugin_id, .. } = action {
+                    if caller_id != plugin_id {
+                        return false;
+                    }
+                }
+
                 match action.permission() {
                     ActionPermission::Public => true,
                     ActionPermission::Capability(required) => granted_caps.contains(&required),
@@ -366,5 +374,27 @@ mod tests {
         assert!(!plugin.is_permitted(&action, &[]));
         assert!(!plugin.is_permitted(&action, &[Capability::PlaybackControl, Capability::UiOverlay]));
         assert!(plugin.is_permitted(&action, &[Capability::Notify]));
+    }
+
+    #[test]
+    fn test_cross_plugin_action_forgery_denied() {
+        let target_action = Action::Plugin {
+            plugin_id: "org.tunotron.target".to_string(),
+            name: "privileged_hook".to_string(),
+            payload: serde_json::json!({}),
+        };
+
+        // User keybinding or internal event can invoke any plugin's action
+        assert!(ActionSource::User.is_permitted(&target_action, &[]));
+        assert!(ActionSource::Internal.is_permitted(&target_action, &[]));
+
+        // Plugin targeting itself is permitted
+        let self_source = ActionSource::Plugin("org.tunotron.target".to_string());
+        assert!(self_source.is_permitted(&target_action, &[]));
+
+        // Rogue or sibling plugin targeting another plugin's namespace is strictly DENIED
+        let rogue_source = ActionSource::Plugin("org.tunotron.rogue".to_string());
+        assert!(!rogue_source.is_permitted(&target_action, &[]));
+        assert!(!rogue_source.is_permitted(&target_action, &[Capability::PlaybackControl, Capability::UiOverlay, Capability::Notify]));
     }
 }
