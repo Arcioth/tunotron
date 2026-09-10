@@ -202,7 +202,7 @@ mod tests {
         ));
         mgr.register(permitted_plugin).unwrap();
 
-        let event = PluginEvent::TimePos(10.0);
+        let event = PluginEvent::TimePos { seconds: 10.0 };
         let envelopes = mgr.dispatch_event(&event);
         assert_eq!(envelopes.len(), 1);
         assert_eq!(envelopes[0].action, Action::TogglePause);

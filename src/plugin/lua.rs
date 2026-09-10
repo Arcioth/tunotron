@@ -10,13 +10,21 @@ pub struct LuaPlugin {
 }
 
 impl LuaPlugin {
-    pub fn from_file(path: &Path) -> Result<Self, String> {
+    pub fn from_file(path: &Path, music_root: Option<&Path>) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read Lua plugin at {}: {}", path.display(), e))?;
-        Self::from_script(&content, path.to_string_lossy().as_ref())
+        Self::from_script_with_root(&content, path.to_string_lossy().as_ref(), music_root)
     }
 
     pub fn from_script(script: &str, chunk_name: &str) -> Result<Self, String> {
+        Self::from_script_with_root(script, chunk_name, None)
+    }
+
+    pub fn from_script_with_root(
+        script: &str,
+        chunk_name: &str,
+        music_root: Option<&Path>,
+    ) -> Result<Self, String> {
         let lua = Lua::new();
 
         // 1. Sandbox setup: strip dangerous host process controls and cap memory (16MB)
@@ -65,6 +73,9 @@ impl LuaPlugin {
         }
 
         let manifest = PluginManifest::new(id, name, version, description, capabilities).with_keybinds(keybinds);
+
+        // 5. Attach capability-gated host APIs (e.g. jailed filesystem reader)
+        attach_jailed_fs_api(&lua, &manifest, music_root)?;
 
         // Store plugin table in Lua registry so we can retrieve its callbacks
         let _ = lua.set_named_registry_value("__tunotron_plugin_table", plugin_tbl);
@@ -138,6 +149,121 @@ fn setup_host_globals(lua: &Lua) -> Result<(), String> {
     globals
         .set("tunotron", tunotron_tbl)
         .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+fn attach_jailed_fs_api(
+    lua: &Lua,
+    manifest: &PluginManifest,
+    music_root: Option<&Path>,
+) -> Result<(), String> {
+    let globals = lua.globals();
+    let tunotron_tbl: Table = globals.get("tunotron").map_err(|e| e.to_string())?;
+
+    let has_read_cap = manifest.capabilities.contains(&Capability::FsJailRead);
+    let root_buf = music_root.map(|p| {
+        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    });
+
+    let root_for_read = root_buf.clone();
+    let read_fn = lua
+        .create_function(move |lua, path_str: String| {
+            if !has_read_cap {
+                return Ok((Value::Nil, Some("Permission denied: missing Capability::FsJailRead".to_string())));
+            }
+            let Some(root) = &root_for_read else {
+                return Ok((Value::Nil, Some("Music directory not configured".to_string())));
+            };
+
+            let target_path = Path::new(&path_str);
+            let resolved = if target_path.is_relative() {
+                root.join(target_path)
+            } else {
+                target_path.to_path_buf()
+            };
+
+            let Some(canonical) = crate::library::browser::resolve_in_jail(root, &resolved) else {
+                let is_escape = if target_path.is_absolute() && !target_path.starts_with(root) {
+                    true
+                } else if let Ok(canon_outside) = resolved.canonicalize() {
+                    !canon_outside.starts_with(root)
+                } else {
+                    let mut depth: isize = 0;
+                    let mut escaped = false;
+                    for comp in target_path.components() {
+                        match comp {
+                            std::path::Component::ParentDir => {
+                                depth -= 1;
+                                if depth < 0 {
+                                    escaped = true;
+                                    break;
+                                }
+                            }
+                            std::path::Component::Normal(_) => {
+                                depth += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    escaped
+                };
+
+                if is_escape {
+                    return Ok((Value::Nil, Some(format!("Access denied: path '{}' escapes music jail", path_str))));
+                }
+
+                return Ok((Value::Nil, Some(format!("File not found or unreadable: '{}'", path_str))));
+            };
+
+            if !canonical.is_file() {
+                return Ok((Value::Nil, Some(format!("Path '{}' is not a regular file", path_str))));
+            }
+
+            let meta = match std::fs::metadata(&canonical) {
+                Ok(m) => m,
+                Err(e) => return Ok((Value::Nil, Some(format!("Failed to read file metadata: {}", e)))),
+            };
+
+            const MAX_READ_BYTES: u64 = 2 * 1024 * 1024; // 2 MB
+            if meta.len() > MAX_READ_BYTES {
+                return Ok((Value::Nil, Some(format!("File size ({} bytes) exceeds 2 MB limit", meta.len()))));
+            }
+
+            match std::fs::read_to_string(&canonical) {
+                Ok(content) => Ok((Value::String(lua.create_string(&content)?), None)),
+                Err(e) => Ok((Value::Nil, Some(format!("Failed to read file as UTF-8 text: {}", e)))),
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    let root_for_exists = root_buf;
+    let exists_fn = lua
+        .create_function(move |_, path_str: String| {
+            if !has_read_cap {
+                return Ok(false);
+            }
+            let Some(root) = &root_for_exists else {
+                return Ok(false);
+            };
+
+            let target_path = Path::new(&path_str);
+            let resolved = if target_path.is_relative() {
+                root.join(target_path)
+            } else {
+                target_path.to_path_buf()
+            };
+
+            if let Some(canonical) = crate::library::browser::resolve_in_jail(root, &resolved) {
+                Ok(canonical.is_file())
+            } else {
+                Ok(false)
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    tunotron_tbl.set("read_file", read_fn).map_err(|e| e.to_string())?;
+    tunotron_tbl.set("file_exists", exists_fn).map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -483,5 +609,142 @@ mod tests {
                 content: "Line 1\nLine 2".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn test_lua_plugin_jailed_file_read_success() {
+        let temp_dir = std::env::temp_dir().join(format!("tunotron_test_jail_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let test_file = temp_dir.join("song.lrc");
+        let _ = std::fs::write(&test_file, "[00:15.00]Jailed lyrics content");
+
+        let script = r#"
+            local p = {}
+            p.manifest = {
+                id = "com.test.fs",
+                capabilities = { "FsJailRead" }
+            }
+            function p.on_action(name, payload)
+                local exists = tunotron.file_exists("song.lrc")
+                local content, err = tunotron.read_file("song.lrc")
+                if exists and content then
+                    return {
+                        action = "ShowModal",
+                        title = "Lyrics",
+                        content = content
+                    }
+                end
+                return nil
+            end
+            return p
+        "#;
+
+        let mut plugin = LuaPlugin::from_script_with_root(script, "fs.lua", Some(&temp_dir)).unwrap();
+        let actions = plugin.on_action("read", &serde_json::json!({}));
+        assert_eq!(
+            actions,
+            vec![Action::ShowModal {
+                title: "Lyrics".to_string(),
+                content: "[00:15.00]Jailed lyrics content".to_string(),
+            }]
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_lua_plugin_jailed_file_read_blocks_path_escape() {
+        let temp_dir = std::env::temp_dir().join(format!("tunotron_test_jail_escape_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        let script = r#"
+            local p = {}
+            p.manifest = {
+                id = "com.test.escape",
+                capabilities = { "FsJailRead" }
+            }
+            function p.on_action(name, payload)
+                local exists = tunotron.file_exists("../../etc/passwd")
+                local content, err = tunotron.read_file("../../etc/passwd")
+                if not exists and not content and string.find(err, "escapes music jail") then
+                    return "ToggleHelp"
+                end
+                return nil
+            end
+            return p
+        "#;
+
+        let mut plugin = LuaPlugin::from_script_with_root(script, "escape.lua", Some(&temp_dir)).unwrap();
+        let actions = plugin.on_action("read", &serde_json::json!({}));
+        assert_eq!(actions, vec![Action::ToggleHelp]);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_lua_plugin_jailed_file_read_missing_capability() {
+        let temp_dir = std::env::temp_dir().join(format!("tunotron_test_jail_nocap_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let test_file = temp_dir.join("song.lrc");
+        let _ = std::fs::write(&test_file, "secret");
+
+        let script = r#"
+            local p = {}
+            p.manifest = {
+                id = "com.test.nocap",
+                capabilities = {} -- Missing FsJailRead!
+            }
+            function p.on_action(name, payload)
+                local exists = tunotron.file_exists("song.lrc")
+                local content, err = tunotron.read_file("song.lrc")
+                if not exists and not content and string.find(err, "missing Capability::FsJailRead") then
+                    return "ToggleHelp"
+                end
+                return nil
+            end
+            return p
+        "#;
+
+        let mut plugin = LuaPlugin::from_script_with_root(script, "nocap.lua", Some(&temp_dir)).unwrap();
+        let actions = plugin.on_action("read", &serde_json::json!({}));
+        assert_eq!(actions, vec![Action::ToggleHelp]);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_lyrics_viewer_example_plugin() {
+        let temp_dir = std::env::temp_dir().join(format!("tunotron_test_jail_lyrics_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let audio_path = temp_dir.join("track.flac");
+        let lrc_path = temp_dir.join("track.lrc");
+        let _ = std::fs::write(&lrc_path, "[00:10.00]First line of lyrics\n[00:20.00]Second line");
+
+        let plugin_path = Path::new("examples/plugins/lyrics_viewer.lua");
+        let mut plugin = LuaPlugin::from_file(plugin_path, Some(&temp_dir)).unwrap();
+
+        // 1. Simulate track changed event
+        let ev = PluginEvent::TrackChanged {
+            track_id: crate::library::track::TrackId(1),
+            title: "Echoes".into(),
+            artist: "Pink Floyd".into(),
+            album: "Meddle".into(),
+            duration_sec: 1400.0,
+            path: audio_path,
+        };
+        let _ = plugin.on_event(&ev);
+
+        // 2. Trigger 'y' keybind action
+        let actions = plugin.on_action("toggle_lyrics", &serde_json::json!({}));
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            Action::ShowModal { title, content } => {
+                assert_eq!(title, "Lyrics: Pink Floyd - Echoes");
+                assert!(content.contains("First line of lyrics"));
+            }
+            other => panic!("Expected Action::ShowModal, got {:?}", other),
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
     let _ = plugin_mgr.register(Box::new(plugin::TrackLoggerPlugin::new()));
 
     let plugin_dir = plugin::default_plugin_dir();
-    let user_plugins_loaded = plugin::load_plugins_from_dir(&plugin_dir, &mut plugin_mgr);
+    let user_plugins_loaded = plugin::load_plugins_from_dir(&plugin_dir, Some(&music_dir), &mut plugin_mgr);
     info!(
         "Plugins initialized: {} built-in, {} external from {}",
         plugin_mgr.len().saturating_sub(user_plugins_loaded),

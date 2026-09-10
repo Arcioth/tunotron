@@ -6,6 +6,7 @@ use crate::library::TrackId;
 use super::manifest::PluginManifest;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum PluginEvent {
     TrackChanged {
         track_id: TrackId,
@@ -16,8 +17,12 @@ pub enum PluginEvent {
         path: PathBuf,
     },
     PlaybackStopped,
-    PlayStateChanged(PlayState),
-    TimePos(f64),
+    PlayStateChanged {
+        state: PlayState,
+    },
+    TimePos {
+        seconds: f64,
+    },
 }
 
 pub trait Plugin: Send {

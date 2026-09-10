@@ -12,7 +12,7 @@ pub fn default_plugin_dir() -> PathBuf {
         .join("tunotron/plugins")
 }
 
-pub fn load_plugins_from_dir(dir: &Path, mgr: &mut PluginManager) -> usize {
+pub fn load_plugins_from_dir(dir: &Path, music_root: Option<&Path>, mgr: &mut PluginManager) -> usize {
     if !dir.exists() || !dir.is_dir() {
         return 0;
     }
@@ -40,7 +40,7 @@ pub fn load_plugins_from_dir(dir: &Path, mgr: &mut PluginManager) -> usize {
         };
 
         if let Some(target) = plugin_file {
-            match LuaPlugin::from_file(&target) {
+            match LuaPlugin::from_file(&target, music_root) {
                 Ok(plugin) => {
                     let id = plugin.manifest().id.clone();
                     if let Err(e) = mgr.register(Box::new(plugin)) {

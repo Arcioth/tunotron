@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.3.5] - 2026-09-10 — Custom Keybinding Registration & Declarative Floating Modals
+## [0.3.5] - 2026-09-10 — Custom Keybindings, Declarative Modals & Safe Jailed File Reading
 
-Following the plugin API expansion roadmap, this release establishes the first two foundational API pillars for Tunotron plugins: **Custom Keybinding Registration (`Capability::KeyBind`)** and **Declarative Floating Modals (`Capability::UiOverlay`)**. Plugins can now hook custom shortcuts and project rich floating TUI windows (e.g. lyrics viewers, track metadata inspectors) without leaking immediate-mode Ratatui frames or risking host security.
+Following the plugin API expansion roadmap, this release establishes the first three foundational API pillars for Tunotron plugins: **Custom Keybinding Registration (`Capability::KeyBind`)**, **Declarative Floating Modals (`Capability::UiOverlay`)**, and **Safe Jailed File Reading (`Capability::FsJailRead`)**. Plugins can now hook custom shortcuts, project rich floating TUI windows, and safely inspect local audio companion files (.lrc lyrics, .txt, .nfo) without leaking immediate-mode Ratatui frames or risking host security.
 
 ### ⌨️ Pillar 1: Custom Keybinding Registration (`Capability::KeyBind`)
 - **Key Chord & Sequence Engine ([`src/keymap.rs`](file:///home/arcioth/Documents/tunotron/src/keymap.rs)):**
@@ -31,12 +31,20 @@ Following the plugin API expansion roadmap, this release establishes the first t
   - Renders rounded, themed popup windows with background clearing (`Clear`) and text wrapping (`Wrap { trim: true }`).
   - Modal shielding: background clicks outside the modal dismiss it automatically; background widgets are shielded from click events while a modal is open.
   - Keyboard dismissal: `Esc` closes the active modal instantly.
-- **Updated Reference Example ([`examples/plugins/track_announcer.lua`](file:///home/arcioth/Documents/tunotron/examples/plugins/track_announcer.lua)):**
-  - Pressing `i` invokes a floating "Track Metadata Inspector" showing title, artist, album, duration, and filepath.
+
+### 📁 Pillar 3: Safe Jailed File Reading (`Capability::FsJailRead`)
+- **Jailed Host Filesystem API ([`src/plugin/lua.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/lua.rs)):**
+  - Injected `tunotron.read_file(path)` and `tunotron.file_exists(path)` into the Lua sandbox.
+  - **Lexical & Canonical Jail Verification:** Validates every path through [`resolve_in_jail`](file:///home/arcioth/Documents/tunotron/src/library/browser.rs#L34-L40) and lexical traversal analysis. Prevents directory traversal attacks (`..`), absolute path escapes (`/etc/passwd`), and symlink breakouts.
+  - **Resource Bounds:** Enforces a strict 2 MB maximum read limit to protect Lua and host memory from exhaustion attacks.
+- **Internal Event Tagging ([`src/plugin/traits.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/traits.rs)):**
+  - Enabled `#[serde(tag = "type")]` for [`PluginEvent`](file:///home/arcioth/Documents/tunotron/src/plugin/traits.rs#L9), providing clean, idiomatic event property access in Lua (`event.type == "TrackChanged"`).
+- **Working Reference Plugin ([`examples/plugins/lyrics_viewer.lua`](file:///home/arcioth/Documents/tunotron/examples/plugins/lyrics_viewer.lua)):**
+  - Demonstrates Pillars 1, 2, and 3 simultaneously: pressing `y` reads local `.lrc` or `.txt` lyrics matching the active song and renders them in a floating modal.
 
 ### 🧪 Automated Testing & Binary Footprint
-- **34 Passed Unit Tests, 0 Warnings (0.08s execution time):**
-  - Added tests for key chord parsing, sequences, reserved key blocking, capability rejection, modal permission checks, reducer modal state transitions, and Lua modal action emission.
+- **38 Passed Unit Tests, 0 Warnings (0.08s execution time):**
+  - Tests verify key chords, sequences, reserved key blocking, capability rejection, modal permission checks, reducer modal transitions, Lua modal emission, jailed file reading, jail escape blocking, missing capability rejection, and the lyrics viewer plugin end-to-end.
 - **Release binary footprint:** **3.6 MB** with Fat LTO and stripped symbols.
 
 ---
