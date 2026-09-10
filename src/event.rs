@@ -1,12 +1,20 @@
+use std::path::PathBuf;
 use crossterm::event::KeyEvent;
 use crate::audio::protocol::MpvEvent;
-use crate::library::track::Track;
+
+#[derive(Debug, Clone)]
+pub struct MetadataPatch {
+    pub path: PathBuf,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub duration_sec: f64,
+    pub track_number: Option<u32>,
+}
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum ScannerEvent {
-    Batch(Vec<Track>),
-    Finished { total_tracks: usize },
+    Batch(Vec<MetadataPatch>),
 }
 
 #[derive(Debug)]

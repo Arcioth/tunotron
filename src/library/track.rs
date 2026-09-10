@@ -10,6 +10,7 @@ pub struct Track {
     pub artist: String,
     pub album: String,
     pub duration_sec: f64,
+    pub duration_label: String,
     pub track_number: Option<u32>,
 }
 
@@ -33,25 +34,37 @@ impl Track {
             artist: "Unknown Artist".to_string(),
             album: "Unknown Album".to_string(),
             duration_sec: 0.0,
+            duration_label: "00:00".to_string(),
             track_number: None,
         }
     }
 
-    pub fn formatted_duration(&self) -> String {
-        let total_sec = self.duration_sec.round() as u64;
-        let mins = total_sec / 60;
-        let secs = total_sec % 60;
-        format!("{:02}:{:02}", mins, secs)
+    pub fn set_duration(&mut self, sec: f64) {
+        self.duration_sec = sec;
+        self.duration_label = format_mmss(sec);
     }
 
     pub fn is_audio_file(path: &Path) -> bool {
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            matches!(
-                ext.to_lowercase().as_str(),
-                "mp3" | "flac" | "ogg" | "opus" | "m4a" | "aac" | "wav" | "wma" | "alac" | "aiff"
-            )
+            ext.eq_ignore_ascii_case("mp3")
+                || ext.eq_ignore_ascii_case("flac")
+                || ext.eq_ignore_ascii_case("ogg")
+                || ext.eq_ignore_ascii_case("opus")
+                || ext.eq_ignore_ascii_case("m4a")
+                || ext.eq_ignore_ascii_case("aac")
+                || ext.eq_ignore_ascii_case("wav")
+                || ext.eq_ignore_ascii_case("wma")
+                || ext.eq_ignore_ascii_case("alac")
+                || ext.eq_ignore_ascii_case("aiff")
         } else {
             false
         }
     }
+}
+
+pub fn format_mmss(seconds: f64) -> String {
+    let total_sec = seconds.round() as u64;
+    let mins = total_sec / 60;
+    let secs = total_sec % 60;
+    format!("{:02}:{:02}", mins, secs)
 }

@@ -25,6 +25,14 @@ impl LoopMode {
             LoopMode::All => "All",
         }
     }
+
+    pub fn badge_str(&self) -> &'static str {
+        match self {
+            LoopMode::Off => "[Loop: Off]",
+            LoopMode::Track => "[Loop: Track]",
+            LoopMode::All => "[Loop: All]",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -45,6 +53,13 @@ impl ShuffleMode {
         match self {
             ShuffleMode::Off => "Off",
             ShuffleMode::On => "On",
+        }
+    }
+
+    pub fn badge_str(&self) -> &'static str {
+        match self {
+            ShuffleMode::Off => "[Shuffle: Off]",
+            ShuffleMode::On => "[Shuffle: On]",
         }
     }
 }

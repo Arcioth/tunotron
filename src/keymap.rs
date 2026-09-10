@@ -11,9 +11,13 @@ pub struct KeyChord {
 
 impl From<KeyEvent> for KeyChord {
     fn from(evt: KeyEvent) -> Self {
+        let mut modifiers = evt.modifiers;
+        if matches!(evt.code, KeyCode::Char(_)) {
+            modifiers.remove(KeyModifiers::SHIFT);
+        }
         Self {
             code: evt.code,
-            modifiers: evt.modifiers,
+            modifiers,
         }
     }
 }
@@ -139,7 +143,7 @@ impl KeySequenceStateMachine {
             self.pending.clear();
         }
         self.last_key_time = Instant::now();
-        self.pending.push(chord);
+        self.pending.push(chord.clone());
 
         // Check if current chord sequence is an exact match
         if let Some(action) = keymap.lookup(&self.pending) {
@@ -149,10 +153,60 @@ impl KeySequenceStateMachine {
 
         // Check if current chord sequence is a prefix of a longer chord
         if keymap.is_prefix(&self.pending) {
-            None
-        } else {
-            self.pending.clear();
-            None
+            return None;
         }
+
+        // Mismatch: retry the last key as a fresh sequence (avoids swallowing key after prefix attempt)
+        self.pending.clear();
+        if let Some(action) = keymap.lookup(std::slice::from_ref(&chord)) {
+            return Some(action);
+        }
+        if keymap.is_prefix(std::slice::from_ref(&chord)) {
+            self.pending.push(chord);
+        }
+        None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shift_normalization() {
+        let key_with_shift = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
+        let chord = KeyChord::from(key_with_shift);
+        assert_eq!(chord.modifiers, KeyModifiers::NONE);
+        assert_eq!(chord.code, KeyCode::Char('?'));
+
+        let key_cap_g = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
+        let chord_g = KeyChord::from(key_cap_g);
+        assert_eq!(chord_g.modifiers, KeyModifiers::NONE);
+        assert_eq!(chord_g.code, KeyCode::Char('G'));
+    }
+
+    #[test]
+    fn test_key_chords_and_prefix_retry() {
+        let keymap = KeyMap::default();
+        let mut sm = KeySequenceStateMachine::new();
+
+        // Feed 'g' -> prefix of 'gg', should return None
+        let g_chord = KeyChord {
+            code: KeyCode::Char('g'),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(sm.feed(g_chord.clone(), &keymap), None);
+
+        // Feed another 'g' -> exact match for Action::MoveToTop
+        assert_eq!(sm.feed(g_chord.clone(), &keymap), Some(Action::MoveToTop));
+
+        // Feed 'g' then 'j' -> mismatch should NOT swallow 'j', it should execute MoveDown(1)
+        assert_eq!(sm.feed(g_chord.clone(), &keymap), None);
+        let j_chord = KeyChord {
+            code: KeyCode::Char('j'),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(sm.feed(j_chord, &keymap), Some(Action::MoveDown(1)));
+    }
+}
+

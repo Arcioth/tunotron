@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use crate::library::scanner::Scanner;
 use crate::library::track::Track;
 
 #[derive(Debug, Clone)]
@@ -28,13 +27,27 @@ impl BrowserEntry {
     }
 }
 
+/// Canonical jail resolver: returns Some(canonical_path) if and only if
+/// the candidate path resides strictly within the root directory.
+pub fn resolve_in_jail(root: &Path, candidate: &Path) -> Option<PathBuf> {
+    let canon_root = root.canonicalize().ok()?;
+    let canon_cand = candidate.canonicalize().ok()?;
+    if canon_cand == canon_root || canon_cand.starts_with(&canon_root) {
+        Some(canon_cand)
+    } else {
+        None
+    }
+}
+
 pub fn read_directory(dir: &Path, root_boundary: &Path) -> Vec<BrowserEntry> {
     let mut items = Vec::new();
 
     // Only allow navigating up if we are strictly inside a subdirectory of the music root
     if dir != root_boundary && dir.starts_with(root_boundary) {
         if let Some(parent) = dir.parent() {
-            items.push(BrowserEntry::ParentDir(parent.to_path_buf()));
+            if let Some(jailed_parent) = resolve_in_jail(root_boundary, parent) {
+                items.push(BrowserEntry::ParentDir(jailed_parent));
+            }
         }
     }
 
@@ -44,21 +57,33 @@ pub fn read_directory(dir: &Path, root_boundary: &Path) -> Vec<BrowserEntry> {
         let mut track_id = 0;
 
         for entry in entries.filter_map(|e| e.ok()) {
+            let ft = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+
+            // Hardened jail: do not traverse symlinks pointing outside the jail
+            if ft.is_symlink() {
+                continue;
+            }
+
             let path = entry.path();
-            if path.is_dir() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                dirs.push(BrowserEntry::Directory { name, path });
-            } else if Track::is_audio_file(&path) {
+            if ft.is_dir() {
+                if let Some(jailed_dir) = resolve_in_jail(root_boundary, &path) {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    dirs.push(BrowserEntry::Directory { name, path: jailed_dir });
+                }
+            } else if ft.is_file() && Track::is_audio_file(&path) {
                 track_id += 1;
-                let track = Scanner::read_metadata_sync(track_id, &path);
+                let track = Track::new(track_id, path);
                 tracks.push(track);
             }
         }
 
-        // Sort directories alphabetically
+        // Sort directories alphabetically (ASCII fast comparison without allocations)
         dirs.sort_by(|a, b| match (a, b) {
             (BrowserEntry::Directory { name: a_name, .. }, BrowserEntry::Directory { name: b_name, .. }) => {
-                a_name.to_lowercase().cmp(&b_name.to_lowercase())
+                ascii_case_cmp(a_name, b_name)
             }
             _ => std::cmp::Ordering::Equal,
         });
@@ -67,7 +92,7 @@ pub fn read_directory(dir: &Path, root_boundary: &Path) -> Vec<BrowserEntry> {
         tracks.sort_by(|a, b| {
             match (a.track_number, b.track_number) {
                 (Some(an), Some(bn)) if an != bn => an.cmp(&bn),
-                _ => a.filename.to_lowercase().cmp(&b.filename.to_lowercase()),
+                _ => ascii_case_cmp(&a.filename, &b.filename),
             }
         });
 
@@ -79,3 +104,47 @@ pub fn read_directory(dir: &Path, root_boundary: &Path) -> Vec<BrowserEntry> {
 
     items
 }
+
+#[inline]
+fn ascii_case_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    a.bytes()
+        .map(|c| c.to_ascii_lowercase())
+        .cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ascii_case_cmp() {
+        assert_eq!(ascii_case_cmp("abc", "ABC"), std::cmp::Ordering::Equal);
+        assert_eq!(ascii_case_cmp("abc", "abd"), std::cmp::Ordering::Less);
+        assert_eq!(ascii_case_cmp("02 track", "01 track"), std::cmp::Ordering::Greater);
+    }
+
+    #[test]
+    fn test_resolve_in_jail() {
+        let tmp = std::env::temp_dir();
+        let jail_root = tmp.join("tunotron_test_jail");
+        let sub = jail_root.join("sub");
+        let _ = std::fs::create_dir_all(&sub);
+
+        // Child is allowed
+        let resolved_sub = resolve_in_jail(&jail_root, &sub);
+        assert!(resolved_sub.is_some());
+
+        // Jail root itself is allowed
+        let resolved_root = resolve_in_jail(&jail_root, &jail_root);
+        assert!(resolved_root.is_some());
+
+        // Path traversal escaping root is blocked
+        let escape_path = jail_root.join("../");
+        let resolved_escape = resolve_in_jail(&jail_root, &escape_path);
+        assert!(resolved_escape.is_none());
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&jail_root);
+    }
+}
+

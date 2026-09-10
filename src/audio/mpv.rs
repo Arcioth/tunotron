@@ -19,12 +19,6 @@ pub struct MpvProcessGuard {
 impl Drop for MpvProcessGuard {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            // Send SIGTERM to mpv
-            if let Some(id) = child.id() {
-                unsafe {
-                    libc::kill(id as libc::pid_t, libc::SIGTERM);
-                }
-            }
             let _ = child.start_kill();
         }
         let _ = std::fs::remove_file(&self.socket_path);
@@ -122,19 +116,18 @@ impl MpvSupervisor {
 
 pub async fn run_mpv_actor(
     stream: UnixStream,
-    mut cmd_rx: mpsc::UnboundedReceiver<MpvCommand>,
-    event_tx: mpsc::UnboundedSender<AppEvent>,
+    mut cmd_rx: mpsc::Receiver<MpvCommand>,
+    event_tx: mpsc::Sender<AppEvent>,
 ) -> Result<()> {
     let (read_half, write_half) = stream.into_split();
-    let mut reader = FramedRead::new(read_half, LinesCodec::new());
-    let mut writer = FramedWrite::new(write_half, LinesCodec::new());
+    let mut reader = FramedRead::new(read_half, LinesCodec::new_with_max_length(64 * 1024));
+    let mut writer = FramedWrite::new(write_half, LinesCodec::new_with_max_length(64 * 1024));
 
     // Register property observations
     let init_cmds = [
         r#"{"command":["observe_property",1,"time-pos"]}"#,
         r#"{"command":["observe_property",2,"pause"]}"#,
         r#"{"command":["observe_property",3,"duration"]}"#,
-        r#"{"command":["observe_property",4,"media-title"]}"#,
         r#"{"command":["observe_property",5,"volume"]}"#,
     ];
     for cmd in init_cmds {
@@ -151,7 +144,7 @@ pub async fn run_mpv_actor(
                     Some(Ok(line)) => {
                         if let Ok(incoming) = serde_json::from_str::<MpvIncoming>(&line) {
                             if let MpvIncoming::Event(event) = incoming {
-                                let _ = event_tx.send(AppEvent::Mpv(event));
+                                let _ = event_tx.send(AppEvent::Mpv(event)).await;
                             }
                         }
                     }

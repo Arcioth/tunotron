@@ -12,6 +12,7 @@ use std::time::Duration;
 use anyhow::Result;
 use crossterm::event::{Event as CrosstermEvent, EventStream, KeyEventKind, MouseButton, MouseEventKind};
 use futures::StreamExt;
+use ratatui::layout::Position;
 use tokio::sync::mpsc;
 use tokio::time::{interval, MissedTickBehavior};
 use tracing::info;
@@ -62,9 +63,9 @@ async fn main() -> Result<()> {
 
     info!("Target music directory: {}", music_dir.display());
 
-    // 3. Channels for cross-thread communication
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AppEvent>();
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<MpvCommand>();
+    // 3. Channels for cross-thread communication (bounded to prevent bufferbloat)
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(64);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<MpvCommand>(64);
 
     // 4. Spawn headless mpv process and async actor
     let supervisor = MpvSupervisor::spawn().await?;
@@ -83,7 +84,7 @@ async fn main() -> Result<()> {
     let terminal = harness.terminal_mut();
 
     // 6. Initialize Application State & Keymap
-    let mut app = AppState::new(music_dir, cmd_tx);
+    let mut app = AppState::new(music_dir, cmd_tx, event_tx.clone());
     let keymap = KeyMap::default();
     let mut key_state_machine = KeySequenceStateMachine::new();
     let theme = Theme::catppuccin_mocha();
@@ -93,10 +94,9 @@ async fn main() -> Result<()> {
     let mut ticker = interval(Duration::from_millis(250));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    let mut should_render = true;
-
     // Initial draw
     terminal.draw(|f| render_app(f, &mut app, &theme))?;
+    let mut should_render = false;
 
     // 8. Central Reactive Event Loop (Zero CPU when idle)
     while app.is_running {
@@ -129,28 +129,22 @@ async fn main() -> Result<()> {
                                 should_render = true;
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
-                                let p_rect = app.progress_rect;
-                                if mouse.column >= p_rect.x
-                                    && mouse.column < p_rect.x + p_rect.width
-                                    && mouse.row >= p_rect.y
-                                    && mouse.row < p_rect.y + p_rect.height
-                                {
-                                    let relative_x = mouse.column.saturating_sub(p_rect.x) as f64;
-                                    let ratio = relative_x / (p_rect.width.max(1) as f64);
+                                if app.show_help {
+                                    // Modal eats clicks; do not hit-test widgets underneath
+                                    continue;
+                                }
+                                let pos = Position { x: mouse.column, y: mouse.row };
+                                if app.progress_rect.contains(pos) {
+                                    let relative_x = mouse.column.saturating_sub(app.progress_rect.x) as f64;
+                                    let denom = app.progress_rect.width.max(1).saturating_sub(1).max(1) as f64;
+                                    let ratio = (relative_x / denom).clamp(0.0, 1.0);
                                     app.handle_action(Action::SeekRatio(ratio));
                                     should_render = true;
-                                } else {
-                                    let b_rect = app.browser_rect;
-                                    let header_offset = if app.density == app::ViewDensity::Compact { 1 } else { 2 };
-                                    if mouse.column >= b_rect.x
-                                        && mouse.column < b_rect.x + b_rect.width
-                                        && mouse.row >= b_rect.y + header_offset
-                                        && mouse.row < b_rect.y + b_rect.height.saturating_sub(1)
-                                    {
-                                        let clicked_row = (mouse.row - b_rect.y - header_offset) as usize;
-                                        app.handle_action(Action::SelectIndex(clicked_row));
-                                        should_render = true;
-                                    }
+                                } else if app.browser_rows_rect.contains(pos) {
+                                    let visual = (mouse.row.saturating_sub(app.browser_rows_rect.y)) as usize;
+                                    let idx = app.table_state.offset() + visual;
+                                    app.handle_action(Action::SelectIndex(idx));
+                                    should_render = true;
                                 }
                             }
                             _ => {}
@@ -167,11 +161,15 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Branch 2: Domain Events (mpv IPC events)
+            // Branch 2: Domain Events (mpv IPC events, background scanner events)
             Some(domain_event) = event_rx.recv() => {
                 match domain_event {
                     AppEvent::Mpv(mpv_ev) => {
-                        app.handle_mpv_event(mpv_ev);
+                        let dirty = app.handle_mpv_event(mpv_ev);
+                        should_render |= dirty;
+                    }
+                    AppEvent::Scanner(event::ScannerEvent::Batch(patches)) => {
+                        app.apply_metadata_patches(patches);
                         should_render = true;
                     }
                     _ => {}
@@ -180,7 +178,14 @@ async fn main() -> Result<()> {
                 // Batch coalescing: drain pending domain events
                 while let Ok(pending) = event_rx.try_recv() {
                     match pending {
-                        AppEvent::Mpv(mpv_ev) => app.handle_mpv_event(mpv_ev),
+                        AppEvent::Mpv(mpv_ev) => {
+                            let dirty = app.handle_mpv_event(mpv_ev);
+                            should_render |= dirty;
+                        }
+                        AppEvent::Scanner(event::ScannerEvent::Batch(patches)) => {
+                            app.apply_metadata_patches(patches);
+                            should_render = true;
+                        }
                         _ => {}
                     }
                 }
@@ -200,5 +205,5 @@ async fn main() -> Result<()> {
 fn dirs_home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/home/arcioth"))
+        .unwrap_or_else(|| PathBuf::from("/"))
 }

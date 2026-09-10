@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::action::{Action, LoopMode, ShuffleMode};
 use crate::audio::{MpvCommand, MpvEvent};
-use crate::library::{read_directory, BrowserEntry, Track};
+use crate::library::{read_directory, resolve_in_jail, BrowserEntry, Track};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewDensity {
@@ -19,6 +19,31 @@ impl ViewDensity {
             ViewDensity::Comfortable => ViewDensity::Compact,
             ViewDensity::Compact => ViewDensity::Comfortable,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct XorShift64(pub u64);
+
+impl XorShift64 {
+    pub fn from_entropy() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9E3779B97F4A7C15);
+        Self(nanos | 1)
+    }
+
+    pub fn next_bound(&mut self, max: usize) -> usize {
+        if max <= 1 {
+            return 0;
+        }
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        (x as usize) % max
     }
 }
 
@@ -59,16 +84,24 @@ pub struct AppState {
     pub active_playlist_index: Option<usize>,
     pub active_playlist_dir: Option<PathBuf>,
     pub shuffle_deck: Vec<usize>,
+    pub shuffle_history: Vec<usize>,
+    pub rng: XorShift64,
     pub playback: PlaybackState,
-    pub cmd_tx: mpsc::UnboundedSender<MpvCommand>,
+    pub cmd_tx: mpsc::Sender<MpvCommand>,
+    pub event_tx: mpsc::Sender<crate::event::AppEvent>,
     pub show_help: bool,
     pub density: ViewDensity,
     pub browser_rect: Rect,
+    pub browser_rows_rect: Rect,
     pub progress_rect: Rect,
 }
 
 impl AppState {
-    pub fn new(music_dir: PathBuf, cmd_tx: mpsc::UnboundedSender<MpvCommand>) -> Self {
+    pub fn new(
+        music_dir: PathBuf,
+        cmd_tx: mpsc::Sender<MpvCommand>,
+        event_tx: mpsc::Sender<crate::event::AppEvent>,
+    ) -> Self {
         let canonical_root = music_dir.canonicalize().unwrap_or(music_dir);
         let mut state = Self {
             is_running: true,
@@ -80,11 +113,15 @@ impl AppState {
             active_playlist_index: None,
             active_playlist_dir: None,
             shuffle_deck: Vec::new(),
+            shuffle_history: Vec::new(),
+            rng: XorShift64::from_entropy(),
             playback: PlaybackState::default(),
             cmd_tx,
+            event_tx,
             show_help: false,
             density: ViewDensity::Comfortable,
             browser_rect: Rect::default(),
+            browser_rows_rect: Rect::default(),
             progress_rect: Rect::default(),
         };
 
@@ -111,6 +148,87 @@ impl AppState {
             let next_idx = old_selected.min(self.browser_items.len() - 1);
             self.table_state.select(Some(next_idx));
         }
+
+        // Spawn non-blocking background metadata scan for audio tracks in this folder
+        let audio_paths: Vec<PathBuf> = self
+            .browser_items
+            .iter()
+            .filter_map(|e| match e {
+                BrowserEntry::AudioTrack(t) => Some(t.path.clone()),
+                _ => None,
+            })
+            .collect();
+
+        crate::library::Scanner::scan_paths_in_background(audio_paths, self.event_tx.clone());
+    }
+
+    pub fn apply_metadata_patches(&mut self, patches: Vec<crate::event::MetadataPatch>) {
+        for patch in patches {
+            for item in &mut self.browser_items {
+                if let BrowserEntry::AudioTrack(t) = item {
+                    if t.path == patch.path {
+                        if let Some(title) = &patch.title {
+                            t.title = title.clone();
+                        }
+                        if let Some(artist) = &patch.artist {
+                            t.artist = artist.clone();
+                        }
+                        if let Some(album) = &patch.album {
+                            t.album = album.clone();
+                        }
+                        if patch.duration_sec > 0.0 {
+                            t.set_duration(patch.duration_sec);
+                        }
+                        if patch.track_number.is_some() {
+                            t.track_number = patch.track_number;
+                        }
+                    }
+                }
+            }
+
+            for t in &mut self.active_playlist {
+                if t.path == patch.path {
+                    if let Some(title) = &patch.title {
+                        t.title = title.clone();
+                    }
+                    if let Some(artist) = &patch.artist {
+                        t.artist = artist.clone();
+                    }
+                    if let Some(album) = &patch.album {
+                        t.album = album.clone();
+                    }
+                    if patch.duration_sec > 0.0 {
+                        t.set_duration(patch.duration_sec);
+                    }
+                    if patch.track_number.is_some() {
+                        t.track_number = patch.track_number;
+                    }
+                }
+            }
+
+            if let Some(ref mut curr) = self.playback.current_track {
+                if curr.path == patch.path {
+                    if let Some(title) = &patch.title {
+                        curr.title = title.clone();
+                    }
+                    if let Some(artist) = &patch.artist {
+                        curr.artist = artist.clone();
+                    }
+                    if let Some(album) = &patch.album {
+                        curr.album = album.clone();
+                    }
+                    if patch.duration_sec > 0.0 {
+                        curr.set_duration(patch.duration_sec);
+                        if self.playback.duration_sec == 0.0 {
+                            self.playback.duration_sec = patch.duration_sec;
+                        }
+                    }
+                    if patch.track_number.is_some() {
+                        curr.track_number = patch.track_number;
+                    }
+                }
+            }
+        }
     }
 
     pub fn handle_action(&mut self, action: Action) {
@@ -123,7 +241,7 @@ impl AppState {
                 }
                 Action::Quit => {
                     self.is_running = false;
-                    let _ = self.cmd_tx.send(MpvCommand::Quit);
+                    let _ = self.cmd_tx.try_send(MpvCommand::Quit);
                     return;
                 }
                 _ => return,
@@ -133,7 +251,7 @@ impl AppState {
         match action {
             Action::Quit => {
                 self.is_running = false;
-                let _ = self.cmd_tx.send(MpvCommand::Quit);
+                let _ = self.cmd_tx.try_send(MpvCommand::Quit);
             }
             Action::ToggleHelp => {
                 self.show_help = true;
@@ -152,9 +270,11 @@ impl AppState {
             Action::GoToParentDirectory => {
                 if self.current_dir != self.music_root && self.current_dir.starts_with(&self.music_root) {
                     if let Some(parent) = self.current_dir.parent().map(|p| p.to_path_buf()) {
-                        self.current_dir = parent;
-                        self.reload_current_directory();
-                        self.table_state.select(Some(0));
+                        if resolve_in_jail(&self.music_root, &parent).is_some() {
+                            self.current_dir = parent;
+                            self.reload_current_directory();
+                            self.table_state.select(Some(0));
+                        }
                     }
                 }
             }
@@ -184,11 +304,11 @@ impl AppState {
                 if self.playback.is_playing {
                     self.playback.is_playing = false;
                     self.playback.is_paused = true;
-                    let _ = self.cmd_tx.send(MpvCommand::SetPause(true));
+                    let _ = self.cmd_tx.try_send(MpvCommand::SetPause(true));
                 } else if self.playback.is_paused {
                     self.playback.is_playing = true;
                     self.playback.is_paused = false;
-                    let _ = self.cmd_tx.send(MpvCommand::SetPause(false));
+                    let _ = self.cmd_tx.try_send(MpvCommand::SetPause(false));
                 } else if let Some(track) = &self.playback.current_track {
                     self.play_track(track.clone());
                 } else {
@@ -196,7 +316,7 @@ impl AppState {
                 }
             }
             Action::Stop => {
-                let _ = self.cmd_tx.send(MpvCommand::Stop);
+                let _ = self.cmd_tx.try_send(MpvCommand::Stop);
                 self.playback.is_playing = false;
                 self.playback.is_paused = false;
                 self.playback.current_time_sec = 0.0;
@@ -208,7 +328,7 @@ impl AppState {
                 self.previous_track();
             }
             Action::Seek(delta_sec) => {
-                let _ = self.cmd_tx.send(MpvCommand::Seek {
+                let _ = self.cmd_tx.try_send(MpvCommand::Seek {
                     seconds: delta_sec as f64,
                     relative: true,
                 });
@@ -216,7 +336,7 @@ impl AppState {
             Action::SeekRatio(ratio) => {
                 let clamped = ratio.clamp(0.0, 1.0);
                 let target_sec = clamped * self.playback.duration_sec;
-                let _ = self.cmd_tx.send(MpvCommand::Seek {
+                let _ = self.cmd_tx.try_send(MpvCommand::Seek {
                     seconds: target_sec,
                     relative: false,
                 });
@@ -225,12 +345,12 @@ impl AppState {
             Action::VolumeDelta(delta_pct) => {
                 let new_vol = (self.playback.volume + delta_pct as f64).clamp(0.0, 100.0);
                 self.playback.volume = new_vol;
-                let _ = self.cmd_tx.send(MpvCommand::SetVolume(new_vol));
+                let _ = self.cmd_tx.try_send(MpvCommand::SetVolume(new_vol));
             }
             Action::SetVolume(vol) => {
                 let clamped = vol.clamp(0.0, 100.0);
                 self.playback.volume = clamped;
-                let _ = self.cmd_tx.send(MpvCommand::SetVolume(clamped));
+                let _ = self.cmd_tx.try_send(MpvCommand::SetVolume(clamped));
             }
             Action::CycleLoopMode => {
                 self.playback.loop_mode = self.playback.loop_mode.next();
@@ -268,16 +388,18 @@ impl AppState {
                 }
             }
             Action::HalfPageDown => {
+                let step = (self.browser_rows_rect.height / 2).max(1) as usize;
                 let total = self.browser_items.len();
                 if total > 0 {
                     let current = self.table_state.selected().unwrap_or(0);
-                    let next = (current + 15).min(total - 1);
+                    let next = (current + step).min(total - 1);
                     self.table_state.select(Some(next));
                 }
             }
             Action::HalfPageUp => {
+                let step = (self.browser_rows_rect.height / 2).max(1) as usize;
                 let current = self.table_state.selected().unwrap_or(0);
-                let prev = current.saturating_sub(15);
+                let prev = current.saturating_sub(step);
                 self.table_state.select(Some(prev));
             }
 
@@ -287,28 +409,27 @@ impl AppState {
     }
 
     pub fn enter_selected(&mut self) {
-        let selected_idx = self.table_state.selected();
-        if let Some(idx) = selected_idx {
-            if let Some(entry) = self.browser_items.get(idx).cloned() {
-                match entry {
-                    BrowserEntry::ParentDir(parent_path) => {
-                        // Enforce jail boundary
-                        if parent_path.starts_with(&self.music_root) || parent_path == self.music_root {
-                            self.current_dir = parent_path;
-                            self.reload_current_directory();
-                            self.table_state.select(Some(0));
-                        }
-                    }
-                    BrowserEntry::Directory { path, .. } => {
-                        self.current_dir = path;
-                        self.reload_current_directory();
-                        self.table_state.select(Some(0));
-                    }
-                    BrowserEntry::AudioTrack(track) => {
-                        self.set_folder_as_active_playlist(&track);
-                    }
+        let Some(idx) = self.table_state.selected() else { return };
+        match self.browser_items.get(idx) {
+            Some(BrowserEntry::ParentDir(parent_path)) => {
+                let parent_path = parent_path.clone();
+                if resolve_in_jail(&self.music_root, &parent_path).is_some() {
+                    self.current_dir = parent_path;
+                    self.reload_current_directory();
+                    self.table_state.select(Some(0));
                 }
             }
+            Some(BrowserEntry::Directory { path, .. }) => {
+                let Some(jailed_path) = resolve_in_jail(&self.music_root, path) else { return };
+                self.current_dir = jailed_path;
+                self.reload_current_directory();
+                self.table_state.select(Some(0));
+            }
+            Some(BrowserEntry::AudioTrack(track)) => {
+                let track = track.clone();
+                self.set_folder_as_active_playlist(&track);
+            }
+            None => {}
         }
     }
 
@@ -342,6 +463,7 @@ impl AppState {
         self.active_playlist = tracks;
         self.active_playlist_index = Some(start_idx);
         self.active_playlist_dir = Some(self.current_dir.clone());
+        self.shuffle_history.clear();
 
         if self.playback.shuffle_mode == ShuffleMode::On {
             self.reset_shuffle_deck();
@@ -366,22 +488,28 @@ impl AppState {
 
     pub fn play_playlist_index(&mut self, idx: usize) {
         if let Some(track) = self.active_playlist.get(idx).cloned() {
+            if let Some(curr) = self.active_playlist_index {
+                if curr != idx {
+                    self.shuffle_history.push(curr);
+                }
+            }
             self.active_playlist_index = Some(idx);
             self.play_track(track);
         }
     }
 
     pub fn play_track(&mut self, track: Track) {
-        self.playback.current_track = Some(track.clone());
         self.playback.is_playing = true;
         self.playback.is_paused = false;
         self.playback.current_time_sec = 0.0;
         self.playback.duration_sec = track.duration_sec;
 
-        let _ = self.cmd_tx.send(MpvCommand::LoadFile {
+        let _ = self.cmd_tx.try_send(MpvCommand::LoadFile {
             path: track.path.to_string_lossy().to_string(),
             replace: true,
         });
+
+        self.playback.current_track = Some(track);
     }
 
     /// Generates a non-repeating Fisher-Yates shuffle deck
@@ -397,7 +525,7 @@ impl AppState {
 
         // Fisher-Yates Shuffle
         for i in (1..deck.len()).rev() {
-            let j = pseudo_random(i + 1);
+            let j = self.rng.next_bound(i + 1);
             deck.swap(i, j);
         }
 
@@ -417,9 +545,15 @@ impl AppState {
             }
         }
 
-        // Shuffle Mode (Fisher-Yates Deck: never plays the same ending song, never repeats until full deck played)
+        // Shuffle Mode (Fisher-Yates Deck: never plays the same ending song, stops at deck end if Loop: Off)
         if self.playback.shuffle_mode == ShuffleMode::On {
             if self.shuffle_deck.is_empty() {
+                if is_auto_eof && self.playback.loop_mode != LoopMode::All {
+                    self.playback.is_playing = false;
+                    self.playback.is_paused = false;
+                    self.playback.current_time_sec = 0.0;
+                    return;
+                }
                 self.reset_shuffle_deck();
             }
 
@@ -461,12 +595,23 @@ impl AppState {
 
         // If more than 3 seconds into track, restart from 0:00
         if self.playback.current_time_sec > 3.0 {
-            let _ = self.cmd_tx.send(MpvCommand::Seek {
+            let _ = self.cmd_tx.try_send(MpvCommand::Seek {
                 seconds: 0.0,
                 relative: false,
             });
             self.playback.current_time_sec = 0.0;
             return;
+        }
+
+        // Under shuffle, step back through shuffle history
+        if self.playback.shuffle_mode == ShuffleMode::On {
+            if let Some(prev) = self.shuffle_history.pop() {
+                if let Some(track) = self.active_playlist.get(prev).cloned() {
+                    self.active_playlist_index = Some(prev);
+                    self.play_track(track);
+                    return;
+                }
+            }
         }
 
         let current_idx = self.active_playlist_index.unwrap_or(0);
@@ -479,7 +624,10 @@ impl AppState {
         self.play_playlist_index(prev_idx);
     }
 
-    pub fn handle_mpv_event(&mut self, event: MpvEvent) {
+    /// Handles an mpv event and returns a boolean `dirty` flag.
+    /// Returns `false` for high-frequency `time-pos` ticks to prevent CPU render storms,
+    /// and `true` for discrete state changes that warrant immediate screen redraw.
+    pub fn handle_mpv_event(&mut self, event: MpvEvent) -> bool {
         match event {
             MpvEvent::PropertyChange { name, data, .. } => {
                 if let Some(val) = data {
@@ -488,53 +636,173 @@ impl AppState {
                             if let Some(num) = val.as_f64() {
                                 self.playback.current_time_sec = num;
                             }
+                            false
                         }
                         "duration" => {
                             if let Some(num) = val.as_f64() {
                                 self.playback.duration_sec = num;
                             }
+                            true
                         }
                         "pause" => {
                             if let Some(paused) = val.as_bool() {
                                 self.playback.is_paused = paused;
                                 self.playback.is_playing = !paused;
                             }
+                            true
                         }
                         "volume" => {
                             if let Some(v) = val.as_f64() {
                                 self.playback.volume = v;
                             }
+                            true
                         }
-                        _ => {}
+                        _ => false,
                     }
+                } else {
+                    false
                 }
             }
             MpvEvent::FileLoaded => {
                 self.playback.is_playing = true;
                 self.playback.is_paused = false;
+                true
             }
             MpvEvent::EndFile { reason, .. } => {
                 if reason.as_deref() == Some("eof") {
                     self.advance_track(true);
                 }
+                true
             }
             MpvEvent::Idle => {
                 self.playback.is_playing = false;
                 self.playback.is_paused = false;
+                true
             }
-            _ => {}
+            _ => false,
         }
     }
 }
 
-fn pseudo_random(max: usize) -> usize {
-    if max <= 1 {
-        return 0;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_xorshift64_deterministic() {
+        let mut rng1 = XorShift64(123456789);
+        let mut rng2 = XorShift64(123456789);
+
+        for _ in 0..100 {
+            assert_eq!(rng1.next_bound(10), rng2.next_bound(10));
+        }
     }
-    use std::time::SystemTime;
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as usize)
-        .unwrap_or(1);
-    nanos % max
+
+    #[test]
+    fn test_xorshift64_bounds() {
+        let mut rng = XorShift64(987654321);
+        for max in [1, 2, 5, 10, 100] {
+            for _ in 0..50 {
+                let val = rng.next_bound(max);
+                assert!(val < max);
+            }
+        }
+    }
+
+    #[test]
+    fn test_advance_track_loop_modes() {
+        let (cmd_tx, _cmd_rx) = mpsc::channel(16);
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let tmp = std::env::temp_dir();
+        let mut app = AppState::new(tmp.clone(), cmd_tx, event_tx);
+
+        let t1 = Track::new(1, tmp.join("1.mp3"));
+        let t2 = Track::new(2, tmp.join("2.mp3"));
+        app.active_playlist = vec![t1, t2];
+        app.active_playlist_index = Some(0);
+        app.playback.is_playing = true;
+
+        // Linear advance to index 1
+        app.advance_track(false);
+        assert_eq!(app.active_playlist_index, Some(1));
+
+        // LoopMode::All wraps around to index 0
+        app.playback.loop_mode = LoopMode::All;
+        app.advance_track(true);
+        assert_eq!(app.active_playlist_index, Some(0));
+
+        // LoopMode::Off stops playback at EOF
+        app.active_playlist_index = Some(1);
+        app.playback.loop_mode = LoopMode::Off;
+        app.advance_track(true);
+        assert_eq!(app.playback.is_playing, false);
+
+        // LoopMode::Track repeats track
+        app.active_playlist_index = Some(0);
+        app.playback.is_playing = true;
+        app.playback.loop_mode = LoopMode::Track;
+        app.advance_track(true);
+        assert_eq!(app.active_playlist_index, Some(0));
+        assert_eq!(app.playback.is_playing, true);
+    }
+
+    #[test]
+    fn test_advance_track_shuffle_loop_off() {
+        let (cmd_tx, _cmd_rx) = mpsc::channel(16);
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let tmp = std::env::temp_dir();
+        let mut app = AppState::new(tmp.clone(), cmd_tx, event_tx);
+
+        let t1 = Track::new(1, tmp.join("1.mp3"));
+        let t2 = Track::new(2, tmp.join("2.mp3"));
+        app.active_playlist = vec![t1, t2];
+        app.active_playlist_index = Some(0);
+        app.playback.is_playing = true;
+        app.playback.shuffle_mode = ShuffleMode::On;
+        app.playback.loop_mode = LoopMode::Off;
+        app.shuffle_deck = vec![1]; // 1 item left in deck
+
+        // Advance plays item 1, emptying deck
+        app.advance_track(false);
+        assert_eq!(app.active_playlist_index, Some(1));
+        assert!(app.shuffle_deck.is_empty());
+
+        // Auto EOF with empty deck and LoopMode::Off halts playback
+        app.advance_track(true);
+        assert_eq!(app.playback.is_playing, false);
+    }
+
+    #[test]
+    fn test_apply_metadata_patches() {
+        let (cmd_tx, _cmd_rx) = mpsc::channel(16);
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let tmp = std::env::temp_dir();
+        let mut app = AppState::new(tmp.clone(), cmd_tx, event_tx);
+
+        let p1 = tmp.join("song.mp3");
+        let t1 = Track::new(1, p1.clone());
+        app.browser_items = vec![BrowserEntry::AudioTrack(t1)];
+
+        let patch = crate::event::MetadataPatch {
+            path: p1,
+            title: Some("New Title".to_string()),
+            artist: Some("New Artist".to_string()),
+            album: Some("New Album".to_string()),
+            duration_sec: 185.0,
+            track_number: Some(4),
+        };
+
+        app.apply_metadata_patches(vec![patch]);
+
+        if let BrowserEntry::AudioTrack(t) = &app.browser_items[0] {
+            assert_eq!(t.title, "New Title");
+            assert_eq!(t.artist, "New Artist");
+            assert_eq!(t.album, "New Album");
+            assert_eq!(t.duration_label, "03:05");
+            assert_eq!(t.track_number, Some(4));
+        } else {
+            panic!("Expected AudioTrack");
+        }
+    }
 }
+

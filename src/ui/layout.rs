@@ -44,8 +44,8 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
 
     let current_path_str = state.current_dir.to_string_lossy();
     let density_label = match state.density {
-        ViewDensity::Comfortable => "Normal",
-        ViewDensity::Compact => "Compact",
+        ViewDensity::Comfortable => "[Z: Normal] ",
+        ViewDensity::Compact => "[Z: Compact] ",
     };
 
     let header_line = Line::from(vec![
@@ -54,7 +54,7 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
         Span::raw("   "),
         Span::styled("[?: Help] ", Style::default().fg(theme.accent)),
         Span::styled("[.: Locate] ", Style::default().fg(theme.accent)),
-        Span::styled(format!("[Z: {}] ", density_label), Style::default().fg(theme.accent)),
+        Span::styled(density_label, Style::default().fg(theme.accent)),
         Span::styled("[m: Loop] ", Style::default().fg(theme.accent)),
         Span::styled("[s: Shuffle]", Style::default().fg(theme.accent)),
     ]);
@@ -69,6 +69,15 @@ fn render_browser_table(frame: &mut Frame, area: Rect, state: &mut AppState, the
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.accent))
         .title(format!(" Music Browser ({} items) ", state.browser_items.len()));
+
+    let inner = block.inner(area);
+    let header_h: u16 = 1 + if state.density == ViewDensity::Compact { 0 } else { 1 };
+    state.browser_rows_rect = Rect {
+        x: inner.x,
+        y: inner.y.saturating_add(header_h),
+        width: inner.width,
+        height: inner.height.saturating_sub(header_h),
+    };
 
     if state.browser_items.is_empty() {
         let empty_row = Row::new(vec![Cell::from("Empty directory. (Jailed to music root)")]);
@@ -109,7 +118,7 @@ fn render_browser_table(frame: &mut Frame, area: Rect, state: &mut AppState, the
                 BrowserEntry::Directory { name, .. } => {
                     Row::new(vec![
                         Cell::from(" 📁"),
-                        Cell::from(format!("{}/", name)),
+                        Cell::from(name.as_str()),
                         Cell::from("<Folder>"),
                         Cell::from(""),
                     ])
@@ -129,9 +138,9 @@ fn render_browser_table(frame: &mut Frame, area: Rect, state: &mut AppState, the
 
                     Row::new(vec![
                         Cell::from(status_icon),
-                        Cell::from(track.title.clone()),
-                        Cell::from(track.artist.clone()),
-                        Cell::from(track.formatted_duration()),
+                        Cell::from(track.title.as_str()),
+                        Cell::from(track.artist.as_str()),
+                        Cell::from(track.duration_label.as_str()),
                     ])
                     .style(track_style)
                 }
@@ -170,6 +179,7 @@ fn render_player_bar(frame: &mut Frame, area: Rect, state: &mut AppState, theme:
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    state.progress_rect = Rect::default();
     if inner.height < 2 {
         return;
     }
@@ -197,8 +207,8 @@ fn render_player_bar(frame: &mut Frame, area: Rect, state: &mut AppState, theme:
         "No track playing. Select an audio file and press Enter.".to_string()
     };
 
-    let loop_mode_str = format!("[Loop: {}]", state.playback.loop_mode.display_str());
-    let shuffle_str = format!("[Shuffle: {}]", state.playback.shuffle_mode.display_str());
+    let loop_mode_str = state.playback.loop_mode.badge_str();
+    let shuffle_str = state.playback.shuffle_mode.badge_str();
     let vol_text = format!("Vol: {:>3.0}%", state.playback.volume);
 
     let row1 = Line::from(vec![
@@ -220,8 +230,8 @@ fn render_player_bar(frame: &mut Frame, area: Rect, state: &mut AppState, theme:
     let duration = state.playback.duration_sec.max(0.001);
     let percent = ((elapsed / duration) * 100.0).clamp(0.0, 100.0) as u16;
 
-    let elapsed_fmt = format_seconds(elapsed);
-    let duration_fmt = format_seconds(state.playback.duration_sec);
+    let elapsed_fmt = crate::library::track::format_mmss(elapsed);
+    let duration_fmt = crate::library::track::format_mmss(state.playback.duration_sec);
     let label = format!("{} / {}", elapsed_fmt, duration_fmt);
 
     let gauge = Gauge::default()
@@ -234,11 +244,4 @@ fn render_player_bar(frame: &mut Frame, area: Rect, state: &mut AppState, theme:
         .label(label);
 
     frame.render_widget(gauge, sub_chunks[1]);
-}
-
-fn format_seconds(seconds: f64) -> String {
-    let total = seconds.round() as u64;
-    let mins = total / 60;
-    let secs = total % 60;
-    format!("{:02}:{:02}", mins, secs)
 }

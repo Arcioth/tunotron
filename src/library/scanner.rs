@@ -3,85 +3,82 @@ use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::probe::Probe;
 use lofty::tag::Accessor;
 use tokio::sync::mpsc;
-use walkdir::WalkDir;
 use tracing::debug;
 
-use super::track::Track;
-use crate::event::{AppEvent, ScannerEvent};
+use crate::event::{AppEvent, MetadataPatch, ScannerEvent};
 
 pub struct Scanner;
 
-#[allow(dead_code)]
 impl Scanner {
-    pub fn scan_directory_in_background(
-        dir: PathBuf,
-        event_tx: mpsc::UnboundedSender<AppEvent>,
+    pub fn scan_paths_in_background(
+        paths: Vec<PathBuf>,
+        event_tx: mpsc::Sender<AppEvent>,
     ) {
+        if paths.is_empty() {
+            return;
+        }
+
         tokio::task::spawn_blocking(move || {
-            let mut tracks = Vec::new();
             let mut batch = Vec::new();
-            let mut current_id = 0;
 
-            for entry in WalkDir::new(&dir)
-                .follow_links(true)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
-                let path = entry.path();
-                if path.is_file() && Track::is_audio_file(path) {
-                    current_id += 1;
-                    let track = Self::read_metadata_sync(current_id, path);
-                    batch.push(track.clone());
-                    tracks.push(track);
-
+            for path in paths {
+                if let Some(patch) = Self::read_tags_blocking(&path) {
+                    batch.push(patch);
                     if batch.len() >= 20 {
-                        let _ = event_tx.send(AppEvent::Scanner(ScannerEvent::Batch(std::mem::take(&mut batch))));
+                        let _ = event_tx.blocking_send(AppEvent::Scanner(ScannerEvent::Batch(
+                            std::mem::take(&mut batch),
+                        )));
                     }
                 }
             }
 
             if !batch.is_empty() {
-                let _ = event_tx.send(AppEvent::Scanner(ScannerEvent::Batch(batch)));
+                let _ = event_tx.blocking_send(AppEvent::Scanner(ScannerEvent::Batch(batch)));
             }
-
-            let _ = event_tx.send(AppEvent::Scanner(ScannerEvent::Finished {
-                total_tracks: tracks.len(),
-            }));
         });
     }
 
-    pub fn read_metadata_sync(id: usize, path: &Path) -> Track {
-        let mut track = Track::new(id, path.to_path_buf());
+    pub fn read_tags_blocking(path: &Path) -> Option<MetadataPatch> {
+        let tagged_file = Probe::open(path).ok()?.read().ok()?;
+        let properties = tagged_file.properties();
+        let duration_sec = properties.duration().as_secs_f64();
 
-        if let Ok(tagged_file) = Probe::open(path).and_then(|p| p.read()) {
-            let properties = tagged_file.properties();
-            track.duration_sec = properties.duration().as_secs_f64();
+        let mut title = None;
+        let mut artist = None;
+        let mut album = None;
+        let mut track_number = None;
 
-            if let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
-                if let Some(title) = tag.title() {
-                    let s = title.trim();
-                    if !s.is_empty() {
-                        track.title = s.to_string();
-                    }
+        if let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
+            if let Some(t) = tag.title() {
+                let s = t.trim();
+                if !s.is_empty() {
+                    title = Some(s.to_string());
                 }
-                if let Some(artist) = tag.artist() {
-                    let s = artist.trim();
-                    if !s.is_empty() {
-                        track.artist = s.to_string();
-                    }
-                }
-                if let Some(album) = tag.album() {
-                    let s = album.trim();
-                    if !s.is_empty() {
-                        track.album = s.to_string();
-                    }
-                }
-                track.track_number = tag.track();
             }
+            if let Some(a) = tag.artist() {
+                let s = a.trim();
+                if !s.is_empty() {
+                    artist = Some(s.to_string());
+                }
+            }
+            if let Some(al) = tag.album() {
+                let s = al.trim();
+                if !s.is_empty() {
+                    album = Some(s.to_string());
+                }
+            }
+            track_number = tag.track();
         } else {
             debug!("Could not read audio tags for: {}", path.display());
         }
 
-        track
+        Some(MetadataPatch {
+            path: path.to_path_buf(),
+            title,
+            artist,
+            album,
+            duration_sec,
+            track_number,
+        })
     }
 }
