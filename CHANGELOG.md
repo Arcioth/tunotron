@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.3] - 2026-09-10 — Rust Plugin Protocol & Sandboxed In-Tree Host
+
+Following user architectural directives, this release establishes the Rust-native plugin protocol and lifecycle host before introducing Lua bindings. Plugins operate strictly as event-driven cold inputs, receiving read-only domain events and emitting capability-checked actions.
+
+### 🔌 Rust Plugin Protocol & Lifecycle
+- **Native `Plugin` Trait ([`src/plugin/traits.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/traits.rs)):** Defined asynchronous-safe, sendable plugin interface:
+  - `manifest(&self) -> &PluginManifest`: Declares plugin ID, human-readable metadata, and requested capabilities.
+  - `on_load(&mut self) -> Result<(), String>`: Lifecycle hook triggered when registered.
+  - `on_event(&mut self, event: &PluginEvent) -> Vec<Action>`: Domain event observer hook.
+  - `on_action(&mut self, name: &str, payload: &Value) -> Vec<Action>`: Direct action invocation hook.
+  - `on_unload(&mut self)`: Graceful cleanup hook.
+- **Read-Only Domain `PluginEvent`:** Owned serializable domain events (`TrackChanged`, `PlaybackStopped`, `PlayStateChanged`, `TimePos`) providing plugins with immutable snapshots.
+- **Plugin Manager Host ([`src/plugin/manager.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/manager.rs)):** Handles registration, unregistration, lifecycle calls, and broadcasts.
+- **Sandboxed Capability Enforcement:** Every `Action` emitted by a plugin is automatically wrapped in an `ActionEnvelope` and evaluated against the plugin's declared `Capability` set. Any attempt to invoke ungranted actions or destructive `HostOnly` actions (`Quit`) is blocked and logged.
+- **Built-in Diagnostic Plugin ([`src/plugin/builtin.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/builtin.rs)):** Added zero-overhead `TrackLoggerPlugin` running by default to observe track changes and verify the pipeline end-to-end.
+
+### 🧪 Automated Testing & Binary Footprint
+- 20 passed unit tests, 0 warnings (0.03s execution time).
+- Unit tests verify plugin registration, lifecycle, capability permission, and default-deny blocking of rogue actions.
+- Maintained exact **3.1 MB** binary size with Fat LTO and stripped symbols.
+
+---
+
 ## [0.3.2] - 2026-09-10 — Pure Reducer, Isolated State & Explicit Typed Effects
 
 Following user architectural directives, this release eliminates side-effects and cross-thread channel handles from `AppState`, completing the pure reducer pattern (`reduce(&mut self, action: Action, geom: &mut UiGeom) -> Vec<Effect>`) and preparing a bulletproof boundary for plugin integrations.

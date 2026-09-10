@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+use serde::{Deserialize, Serialize};
 
 use crate::action::{Action, Effect, LoopMode, ShuffleMode, WindowId};
 use crate::audio::{MpvCommand, MpvEvent};
@@ -22,7 +23,7 @@ impl ViewDensity {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlayState {
     Stopped,
     Playing,

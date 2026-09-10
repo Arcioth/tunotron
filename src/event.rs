@@ -29,5 +29,6 @@ pub enum AppEvent {
         items: Vec<crate::library::BrowserEntry>,
     },
     Scanner(ScannerEvent),
+    Action(crate::action::ActionEnvelope),
     Tick,
 }

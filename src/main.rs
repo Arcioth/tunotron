@@ -4,6 +4,7 @@ mod audio;
 mod event;
 mod keymap;
 mod library;
+mod plugin;
 mod terminal;
 mod ui;
 
@@ -96,9 +97,12 @@ async fn main() -> Result<()> {
     let mut harness = TerminalHarness::init(crash_file)?;
     let terminal = harness.terminal_mut();
 
-    // 6. Initialize Application State, UI Geometry & Keymap
+    // 6. Initialize Application State, UI Geometry, Keymap & Plugins
+    let mut plugin_mgr = plugin::PluginManager::new();
+    let _ = plugin_mgr.register(Box::new(plugin::TrackLoggerPlugin::new()));
+
     let (mut app, init_effects) = AppState::new(music_dir);
-    execute_effects(init_effects, &cmd_tx, &event_tx);
+    execute_effects(init_effects, &cmd_tx, &event_tx, &mut plugin_mgr);
     let mut geom = UiGeom::new();
     geom.clamp_selection(app.browser_items.len());
 
@@ -133,7 +137,7 @@ async fn main() -> Result<()> {
                         let chord = KeyChord::from(key);
                         if let Some(action) = key_state_machine.feed(chord, &keymap) {
                             let effects = app.reduce(action, &mut geom);
-                            execute_effects(effects, &cmd_tx, &event_tx);
+                            execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
                             should_render = true;
                         }
                     }
@@ -141,12 +145,12 @@ async fn main() -> Result<()> {
                         match mouse.kind {
                             MouseEventKind::ScrollDown => {
                                 let effects = app.reduce(Action::MoveDown(2), &mut geom);
-                                execute_effects(effects, &cmd_tx, &event_tx);
+                                execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
                                 should_render = true;
                             }
                             MouseEventKind::ScrollUp => {
                                 let effects = app.reduce(Action::MoveUp(2), &mut geom);
-                                execute_effects(effects, &cmd_tx, &event_tx);
+                                execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
                                 should_render = true;
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
@@ -165,13 +169,13 @@ async fn main() -> Result<()> {
                                     let denom = geom.progress_rect.width.max(1).saturating_sub(1).max(1) as f64;
                                     let ratio = (relative_x / denom).clamp(0.0, 1.0);
                                     let effects = app.reduce(Action::SeekRatio(ratio), &mut geom);
-                                    execute_effects(effects, &cmd_tx, &event_tx);
+                                    execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
                                     should_render = true;
                                 } else if geom.browser_rows_rect.contains(pos) {
                                     let visual = (mouse.row.saturating_sub(geom.browser_rows_rect.y)) as usize;
                                     let idx = geom.scroll_offset() + visual;
                                     let effects = app.reduce(Action::SelectIndex(idx), &mut geom);
-                                    execute_effects(effects, &cmd_tx, &event_tx);
+                                    execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
                                     should_render = true;
                                 }
                             }
@@ -189,13 +193,40 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Branch 2: Domain Events (mpv IPC events, background scanner events, async directory loading)
+            // Branch 2: Domain Events (mpv IPC events, background scanner events, async directory loading, plugin actions)
             Some(domain_event) = event_rx.recv() => {
                 match domain_event {
                     AppEvent::Mpv(mpv_ev) => {
+                        let is_file_loaded = matches!(mpv_ev, audio::MpvEvent::FileLoaded);
+                        let is_idle = matches!(mpv_ev, audio::MpvEvent::Idle);
                         let (dirty, effects) = app.handle_mpv_event(mpv_ev);
-                        execute_effects(effects, &cmd_tx, &event_tx);
+                        execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
                         should_render |= dirty;
+
+                        // Broadcast domain events to plugins
+                        if is_file_loaded {
+                            if let Some(track) = &app.playback.current_track {
+                                let ev = plugin::PluginEvent::TrackChanged {
+                                    track_id: track.id,
+                                    title: track.title.clone(),
+                                    artist: track.artist.clone(),
+                                    album: track.album.clone(),
+                                    duration_sec: track.duration_sec,
+                                    path: track.path.clone(),
+                                };
+                                let plugin_actions = plugin_mgr.dispatch_event(&ev);
+                                for env in plugin_actions {
+                                    let effects = app.reduce(env.action, &mut geom);
+                                    execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
+                                }
+                            }
+                        } else if is_idle {
+                            let plugin_actions = plugin_mgr.dispatch_event(&plugin::PluginEvent::PlaybackStopped);
+                            for env in plugin_actions {
+                                let effects = app.reduce(env.action, &mut geom);
+                                execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
+                            }
+                        }
                     }
                     AppEvent::TimePos(sec) => {
                         app.clock.sync(sec);
@@ -209,12 +240,17 @@ async fn main() -> Result<()> {
                     }
                     AppEvent::DirectoryLoaded { dir, items } if dir == app.current_dir => {
                         let effects = app.set_browser_items(items);
-                        execute_effects(effects, &cmd_tx, &event_tx);
+                        execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
                         geom.clamp_selection(app.browser_items.len());
                         should_render = true;
                     }
                     AppEvent::Scanner(event::ScannerEvent::Batch(patches)) => {
                         app.apply_metadata_patches(patches);
+                        should_render = true;
+                    }
+                    AppEvent::Action(env) => {
+                        let effects = app.reduce(env.action, &mut geom);
+                        execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
                         should_render = true;
                     }
                     _ => {}
@@ -224,9 +260,35 @@ async fn main() -> Result<()> {
                 while let Ok(pending) = event_rx.try_recv() {
                     match pending {
                         AppEvent::Mpv(mpv_ev) => {
+                            let is_file_loaded = matches!(mpv_ev, audio::MpvEvent::FileLoaded);
+                            let is_idle = matches!(mpv_ev, audio::MpvEvent::Idle);
                             let (dirty, effects) = app.handle_mpv_event(mpv_ev);
-                            execute_effects(effects, &cmd_tx, &event_tx);
+                            execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
                             should_render |= dirty;
+
+                            if is_file_loaded {
+                                if let Some(track) = &app.playback.current_track {
+                                    let ev = plugin::PluginEvent::TrackChanged {
+                                        track_id: track.id,
+                                        title: track.title.clone(),
+                                        artist: track.artist.clone(),
+                                        album: track.album.clone(),
+                                        duration_sec: track.duration_sec,
+                                        path: track.path.clone(),
+                                    };
+                                    let plugin_actions = plugin_mgr.dispatch_event(&ev);
+                                    for env in plugin_actions {
+                                        let effects = app.reduce(env.action, &mut geom);
+                                        execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
+                                    }
+                                }
+                            } else if is_idle {
+                                let plugin_actions = plugin_mgr.dispatch_event(&plugin::PluginEvent::PlaybackStopped);
+                                for env in plugin_actions {
+                                    let effects = app.reduce(env.action, &mut geom);
+                                    execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
+                                }
+                            }
                         }
                         AppEvent::TimePos(sec) => {
                             app.clock.sync(sec);
@@ -240,12 +302,17 @@ async fn main() -> Result<()> {
                         }
                         AppEvent::DirectoryLoaded { dir, items } if dir == app.current_dir => {
                             let effects = app.set_browser_items(items);
-                            execute_effects(effects, &cmd_tx, &event_tx);
+                            execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
                             geom.clamp_selection(app.browser_items.len());
                             should_render = true;
                         }
                         AppEvent::Scanner(event::ScannerEvent::Batch(patches)) => {
                             app.apply_metadata_patches(patches);
+                            should_render = true;
+                        }
+                        AppEvent::Action(env) => {
+                            let effects = app.reduce(env.action, &mut geom);
+                            execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
                             should_render = true;
                         }
                         _ => {}
@@ -280,6 +347,7 @@ fn execute_effects(
     effects: Vec<Effect>,
     cmd_tx: &mpsc::Sender<MpvCommand>,
     event_tx: &mpsc::Sender<AppEvent>,
+    plugin_mgr: &mut plugin::PluginManager,
 ) {
     for effect in effects {
         match effect {
@@ -297,7 +365,10 @@ fn execute_effects(
                 library::Scanner::scan_paths_in_background(paths, event_tx.clone());
             }
             Effect::PluginAction { plugin_id, name, payload } => {
-                tracing::debug!("Dispatching plugin action: [{}] {} {:?}", plugin_id, name, payload);
+                let envelopes = plugin_mgr.dispatch_action(&plugin_id, &name, &payload);
+                for env in envelopes {
+                    let _ = event_tx.try_send(AppEvent::Action(env));
+                }
             }
         }
     }
