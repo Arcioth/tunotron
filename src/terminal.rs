@@ -58,10 +58,17 @@ impl TerminalHarness {
                 .open(&log_path)
             {
                 let backtrace = std::backtrace::Backtrace::capture();
+                let timestamp = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                    Ok(d) => {
+                        let s = d.as_secs();
+                        format!("UNIX {} ({:02}:{:02}:{:02} UTC)", s, (s / 3600) % 24, (s / 60) % 60, s % 60)
+                    }
+                    Err(_) => "Unknown Time".to_string(),
+                };
                 let _ = writeln!(
                     file,
                     "--- TUNOTRON CRASH [{}] ---\n{}\nBacktrace:\n{}\n",
-                    chrono::Utc::now().to_rfc3339(),
+                    timestamp,
                     panic_info,
                     backtrace
                 );

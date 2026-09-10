@@ -68,7 +68,7 @@ fn render_browser_table(frame: &mut Frame, area: Rect, state: &mut AppState, the
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.accent))
-        .title(format!(" Music Browser ({} items) ", state.browser_items.len()));
+        .title(state.browser_title.as_str());
 
     let inner = block.inner(area);
     let header_h: u16 = 1 + if state.density == ViewDensity::Compact { 0 } else { 1 };
@@ -127,7 +127,7 @@ fn render_browser_table(frame: &mut Frame, area: Rect, state: &mut AppState, the
                 BrowserEntry::AudioTrack(track) => {
                     let is_active_track = current_playing_path == Some(&track.path);
                     let (status_icon, track_style) = if is_active_track {
-                        if state.playback.is_playing {
+                        if state.playback.is_playing() {
                             (" ▶ ", Style::default().fg(theme.gauge_fill).add_modifier(Modifier::BOLD))
                         } else {
                             (" ⏸ ", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
@@ -192,47 +192,39 @@ fn render_player_bar(frame: &mut Frame, area: Rect, state: &mut AppState, theme:
     // Save progress bar hitbox for mouse clicks
     state.progress_rect = sub_chunks[1];
 
-    // Row 1: Status Icon + Title + Artist + Loop/Shuffle + Volume
-    let status_icon = if state.playback.is_playing {
+    // Row 1: Status Icon + Title + Artist + Loop/Shuffle + Volume (Zero heap allocations)
+    let status_icon = if state.playback.is_playing() {
         Span::styled(" ▶ PLAYING ", Style::default().fg(theme.gauge_fill).add_modifier(Modifier::BOLD))
-    } else if state.playback.is_paused {
+    } else if state.playback.is_paused() {
         Span::styled(" ⏸ PAUSED  ", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
     } else {
         Span::styled(" ⏹ STOPPED ", Style::default().fg(theme.secondary))
     };
 
-    let track_info = if let Some(track) = &state.playback.current_track {
-        format!("{} — {}", track.artist, track.title)
-    } else {
-        "No track playing. Select an audio file and press Enter.".to_string()
-    };
-
     let loop_mode_str = state.playback.loop_mode.badge_str();
     let shuffle_str = state.playback.shuffle_mode.badge_str();
-    let vol_text = format!("Vol: {:>3.0}%", state.playback.volume);
 
     let row1 = Line::from(vec![
         status_icon,
         Span::raw(" "),
-        Span::styled(track_info, Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            state.playback.now_playing_label.as_str(),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" | "),
         Span::styled(loop_mode_str, Style::default().fg(theme.accent)),
         Span::raw(" "),
         Span::styled(shuffle_str, Style::default().fg(theme.accent)),
         Span::raw(" | "),
-        Span::styled(vol_text, Style::default().fg(theme.secondary)),
+        Span::styled(state.playback.vol_label.as_str(), Style::default().fg(theme.secondary)),
     ]);
 
     frame.render_widget(Paragraph::new(row1), sub_chunks[0]);
 
-    // Row 2: Progress Gauge
-    let elapsed = state.playback.current_time_sec;
+    // Row 2: Progress Gauge (Interpolated via monotonic PlaybackClock, 0 heap allocations)
+    let elapsed = state.clock.now();
     let duration = state.playback.duration_sec.max(0.001);
     let percent = ((elapsed / duration) * 100.0).clamp(0.0, 100.0) as u16;
-
-    let elapsed_fmt = crate::library::track::format_mmss(elapsed);
-    let duration_fmt = crate::library::track::format_mmss(state.playback.duration_sec);
-    let label = format!("{} / {}", elapsed_fmt, duration_fmt);
 
     let gauge = Gauge::default()
         .gauge_style(
@@ -241,7 +233,7 @@ fn render_player_bar(frame: &mut Frame, area: Rect, state: &mut AppState, theme:
                 .bg(theme.gauge_bg),
         )
         .percent(percent)
-        .label(label);
+        .label(state.playback.time_label.as_str());
 
     frame.render_widget(gauge, sub_chunks[1]);
 }

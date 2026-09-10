@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
 use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 use tokio::sync::mpsc;
@@ -20,6 +22,56 @@ impl ViewDensity {
             ViewDensity::Comfortable => ViewDensity::Compact,
             ViewDensity::Compact => ViewDensity::Comfortable,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayState {
+    Stopped,
+    Playing,
+    Paused,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlaybackClock {
+    anchor_pos: f64,
+    anchor_at: Instant,
+    playing: bool,
+}
+
+impl PlaybackClock {
+    pub fn new() -> Self {
+        Self {
+            anchor_pos: 0.0,
+            anchor_at: Instant::now(),
+            playing: false,
+        }
+    }
+
+    pub fn now(&self) -> f64 {
+        if self.playing {
+            self.anchor_pos + self.anchor_at.elapsed().as_secs_f64()
+        } else {
+            self.anchor_pos
+        }
+    }
+
+    pub fn sync(&mut self, pos: f64) {
+        self.anchor_pos = pos.max(0.0);
+        self.anchor_at = Instant::now();
+    }
+
+    pub fn set_playing(&mut self, playing: bool) {
+        let cur = self.now();
+        self.anchor_pos = cur;
+        self.anchor_at = Instant::now();
+        self.playing = playing;
+    }
+}
+
+impl Default for PlaybackClock {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -50,28 +102,74 @@ impl XorShift64 {
 
 #[derive(Debug, Clone)]
 pub struct PlaybackState {
-    pub is_playing: bool,
-    pub is_paused: bool,
+    pub state: PlayState,
     pub current_time_sec: f64,
     pub duration_sec: f64,
     pub volume: f64,
     pub loop_mode: LoopMode,
     pub shuffle_mode: ShuffleMode,
-    pub current_track: Option<Track>,
+    pub current_track: Option<Arc<Track>>,
+    // Precomputed strings to guarantee 0 heap allocations during per-frame rendering
+    pub now_playing_label: String,
+    pub vol_label: String,
+    pub duration_label: String,
+    pub time_label: String,
+}
+
+impl PlaybackState {
+    pub fn is_playing(&self) -> bool {
+        self.state == PlayState::Playing
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.state == PlayState::Paused
+    }
+
+    #[allow(dead_code)]
+    pub fn is_stopped(&self) -> bool {
+        self.state == PlayState::Stopped
+    }
+
+    pub fn update_now_playing(&mut self) {
+        if let Some(track) = &self.current_track {
+            self.now_playing_label = format!("{} — {}", track.artist, track.title);
+        } else {
+            self.now_playing_label = "No track playing. Select an audio file and press Enter.".to_string();
+        }
+    }
+
+    pub fn update_vol_label(&mut self) {
+        self.vol_label = format!("Vol: {:>3.0}%", self.volume);
+    }
+
+    pub fn update_duration_label(&mut self) {
+        self.duration_label = crate::library::track::format_mmss(self.duration_sec);
+    }
+
+    pub fn update_time_label(&mut self, elapsed_sec: f64) {
+        let elapsed_fmt = crate::library::track::format_mmss(elapsed_sec);
+        self.time_label = format!("{} / {}", elapsed_fmt, self.duration_label);
+    }
 }
 
 impl Default for PlaybackState {
     fn default() -> Self {
-        Self {
-            is_playing: false,
-            is_paused: false,
+        let mut s = Self {
+            state: PlayState::Stopped,
             current_time_sec: 0.0,
             duration_sec: 0.0,
             volume: 100.0,
             loop_mode: LoopMode::All,
             shuffle_mode: ShuffleMode::Off,
             current_track: None,
-        }
+            now_playing_label: String::new(),
+            vol_label: String::new(),
+            duration_label: "00:00".to_string(),
+            time_label: "00:00 / 00:00".to_string(),
+        };
+        s.update_now_playing();
+        s.update_vol_label();
+        s
     }
 }
 
@@ -81,13 +179,16 @@ pub struct AppState {
     pub current_dir: PathBuf,
     pub browser_items: Vec<BrowserEntry>,
     pub table_state: TableState,
-    pub active_playlist: Vec<Track>,
+    pub active_playlist: Vec<Arc<Track>>,
     pub active_playlist_index: Option<usize>,
     pub active_playlist_dir: Option<PathBuf>,
     pub shuffle_deck: Vec<usize>,
     pub shuffle_history: Vec<usize>,
     pub rng: XorShift64,
     pub playback: PlaybackState,
+    pub clock: PlaybackClock,
+    pub last_rendered_sec: u64,
+    pub browser_title: String,
     pub metadata_cache: HashMap<PathBuf, crate::event::MetadataPatch>,
     pub cmd_tx: mpsc::Sender<MpvCommand>,
     pub event_tx: mpsc::Sender<crate::event::AppEvent>,
@@ -99,6 +200,8 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub const METADATA_CACHE_CAP: usize = 10_000;
+
     pub fn new(
         music_dir: PathBuf,
         cmd_tx: mpsc::Sender<MpvCommand>,
@@ -118,6 +221,9 @@ impl AppState {
             shuffle_history: Vec::new(),
             rng: XorShift64::from_entropy(),
             playback: PlaybackState::default(),
+            clock: PlaybackClock::new(),
+            last_rendered_sec: 0,
+            browser_title: " Music Browser (0 items) ".to_string(),
             metadata_cache: HashMap::new(),
             cmd_tx,
             event_tx,
@@ -135,7 +241,7 @@ impl AppState {
     }
 
     pub fn is_playing(&self) -> bool {
-        self.playback.is_playing
+        self.playback.is_playing()
     }
 
     /// Non-blocking folder reload: reads directory in background thread pool to prevent UI stutters
@@ -159,21 +265,23 @@ impl AppState {
         for entry in &mut items {
             if let BrowserEntry::AudioTrack(track) = entry {
                 if let Some(patch) = self.metadata_cache.get(&track.path) {
+                    let mut updated = (**track).clone();
                     if let Some(title) = &patch.title {
-                        track.title = title.clone();
+                        updated.title = title.clone();
                     }
                     if let Some(artist) = &patch.artist {
-                        track.artist = artist.clone();
+                        updated.artist = artist.clone();
                     }
                     if let Some(album) = &patch.album {
-                        track.album = album.clone();
+                        updated.album = album.clone();
                     }
                     if patch.duration_sec > 0.0 {
-                        track.set_duration(patch.duration_sec);
+                        updated.set_duration(patch.duration_sec);
                     }
                     if patch.track_number.is_some() {
-                        track.track_number = patch.track_number;
+                        updated.track_number = patch.track_number;
                     }
+                    *track = Arc::new(updated);
                 } else {
                     missing_paths.push(track.path.clone());
                 }
@@ -181,6 +289,7 @@ impl AppState {
         }
 
         self.browser_items = items;
+        self.browser_title = format!(" Music Browser ({} items) ", self.browser_items.len());
 
         if self.browser_items.is_empty() {
             self.table_state.select(None);
@@ -197,71 +306,86 @@ impl AppState {
 
     pub fn apply_metadata_patches(&mut self, patches: Vec<crate::event::MetadataPatch>) {
         for patch in patches {
-            // Save in session cache to eliminate re-reads upon revisiting
+            // Cap metadata cache at METADATA_CACHE_CAP (10,000 tracks)
+            if self.metadata_cache.len() >= Self::METADATA_CACHE_CAP {
+                if let Some(first_key) = self.metadata_cache.keys().next().cloned() {
+                    self.metadata_cache.remove(&first_key);
+                }
+            }
             self.metadata_cache.insert(patch.path.clone(), patch.clone());
 
             for item in &mut self.browser_items {
                 if let BrowserEntry::AudioTrack(t) = item {
                     if t.path == patch.path {
+                        let mut updated = (**t).clone();
                         if let Some(title) = &patch.title {
-                            t.title = title.clone();
+                            updated.title = title.clone();
                         }
                         if let Some(artist) = &patch.artist {
-                            t.artist = artist.clone();
+                            updated.artist = artist.clone();
                         }
                         if let Some(album) = &patch.album {
-                            t.album = album.clone();
+                            updated.album = album.clone();
                         }
                         if patch.duration_sec > 0.0 {
-                            t.set_duration(patch.duration_sec);
+                            updated.set_duration(patch.duration_sec);
                         }
                         if patch.track_number.is_some() {
-                            t.track_number = patch.track_number;
+                            updated.track_number = patch.track_number;
                         }
+                        *t = Arc::new(updated);
+                        break;
                     }
                 }
             }
 
             for t in &mut self.active_playlist {
                 if t.path == patch.path {
+                    let mut updated = (**t).clone();
                     if let Some(title) = &patch.title {
-                        t.title = title.clone();
+                        updated.title = title.clone();
                     }
                     if let Some(artist) = &patch.artist {
-                        t.artist = artist.clone();
+                        updated.artist = artist.clone();
                     }
                     if let Some(album) = &patch.album {
-                        t.album = album.clone();
+                        updated.album = album.clone();
                     }
                     if patch.duration_sec > 0.0 {
-                        t.set_duration(patch.duration_sec);
+                        updated.set_duration(patch.duration_sec);
                     }
                     if patch.track_number.is_some() {
-                        t.track_number = patch.track_number;
+                        updated.track_number = patch.track_number;
                     }
+                    *t = Arc::new(updated);
                 }
             }
 
-            if let Some(ref mut curr) = self.playback.current_track {
+            if let Some(curr) = &self.playback.current_track {
                 if curr.path == patch.path {
+                    let mut updated = (**curr).clone();
                     if let Some(title) = &patch.title {
-                        curr.title = title.clone();
+                        updated.title = title.clone();
                     }
                     if let Some(artist) = &patch.artist {
-                        curr.artist = artist.clone();
+                        updated.artist = artist.clone();
                     }
                     if let Some(album) = &patch.album {
-                        curr.album = album.clone();
+                        updated.album = album.clone();
                     }
                     if patch.duration_sec > 0.0 {
-                        curr.set_duration(patch.duration_sec);
+                        updated.set_duration(patch.duration_sec);
                         if self.playback.duration_sec == 0.0 {
                             self.playback.duration_sec = patch.duration_sec;
                         }
                     }
                     if patch.track_number.is_some() {
-                        curr.track_number = patch.track_number;
+                        updated.track_number = patch.track_number;
                     }
+                    self.playback.current_track = Some(Arc::new(updated));
+                    self.playback.update_now_playing();
+                    self.playback.update_duration_label();
+                    self.playback.update_time_label(self.clock.now());
                 }
             }
         }
@@ -335,27 +459,29 @@ impl AppState {
                 }
             }
 
-            // Robust Pause & Resume
+            // Robust Pause & Resume with PlayState and PlaybackClock
             Action::TogglePause => {
-                if self.playback.is_playing {
-                    self.playback.is_playing = false;
-                    self.playback.is_paused = true;
+                if self.playback.is_playing() {
+                    self.playback.state = PlayState::Paused;
+                    self.clock.set_playing(false);
                     let _ = self.cmd_tx.try_send(MpvCommand::SetPause(true));
-                } else if self.playback.is_paused {
-                    self.playback.is_playing = true;
-                    self.playback.is_paused = false;
+                } else if self.playback.is_paused() {
+                    self.playback.state = PlayState::Playing;
+                    self.clock.set_playing(true);
                     let _ = self.cmd_tx.try_send(MpvCommand::SetPause(false));
                 } else if let Some(track) = &self.playback.current_track {
-                    self.play_track(track.clone());
+                    self.play_track(Arc::clone(track));
                 } else {
                     self.play_first_audio_in_current_folder();
                 }
             }
             Action::Stop => {
                 let _ = self.cmd_tx.try_send(MpvCommand::Stop);
-                self.playback.is_playing = false;
-                self.playback.is_paused = false;
+                self.playback.state = PlayState::Stopped;
+                self.clock.sync(0.0);
+                self.clock.set_playing(false);
                 self.playback.current_time_sec = 0.0;
+                self.playback.update_time_label(0.0);
             }
             Action::NextTrack => {
                 self.advance_track(false);
@@ -364,6 +490,10 @@ impl AppState {
                 self.previous_track();
             }
             Action::Seek(delta_sec) => {
+                let new_pos = (self.clock.now() + delta_sec as f64).clamp(0.0, self.playback.duration_sec.max(0.0));
+                self.clock.sync(new_pos);
+                self.playback.current_time_sec = new_pos;
+                self.playback.update_time_label(new_pos);
                 let _ = self.cmd_tx.try_send(MpvCommand::Seek {
                     seconds: delta_sec as f64,
                     relative: true,
@@ -372,20 +502,24 @@ impl AppState {
             Action::SeekRatio(ratio) => {
                 let clamped = ratio.clamp(0.0, 1.0);
                 let target_sec = clamped * self.playback.duration_sec;
+                self.clock.sync(target_sec);
+                self.playback.current_time_sec = target_sec;
+                self.playback.update_time_label(target_sec);
                 let _ = self.cmd_tx.try_send(MpvCommand::Seek {
                     seconds: target_sec,
                     relative: false,
                 });
-                self.playback.current_time_sec = target_sec;
             }
             Action::VolumeDelta(delta_pct) => {
                 let new_vol = (self.playback.volume + delta_pct as f64).clamp(0.0, 100.0);
                 self.playback.volume = new_vol;
+                self.playback.update_vol_label();
                 let _ = self.cmd_tx.try_send(MpvCommand::SetVolume(new_vol));
             }
             Action::SetVolume(vol) => {
                 let clamped = vol.clamp(0.0, 100.0);
                 self.playback.volume = clamped;
+                self.playback.update_vol_label();
                 let _ = self.cmd_tx.try_send(MpvCommand::SetVolume(clamped));
             }
             Action::CycleLoopMode => {
@@ -487,11 +621,11 @@ impl AppState {
         }
     }
 
-    fn set_folder_as_active_playlist(&mut self, starting_track: &Track) {
+    fn set_folder_as_active_playlist(&mut self, starting_track: &Arc<Track>) {
         let mut tracks = Vec::new();
         for item in &self.browser_items {
             if let BrowserEntry::AudioTrack(t) = item {
-                tracks.push(t.clone());
+                tracks.push(Arc::clone(t));
             }
         }
 
@@ -505,13 +639,13 @@ impl AppState {
             self.reset_shuffle_deck();
         }
 
-        self.play_track(starting_track.clone());
+        self.play_track(Arc::clone(starting_track));
     }
 
     fn play_first_audio_in_current_folder(&mut self) {
         let first_track = self.browser_items.iter().find_map(|item| {
             if let BrowserEntry::AudioTrack(track) = item {
-                Some(track.clone())
+                Some(Arc::clone(track))
             } else {
                 None
             }
@@ -534,9 +668,10 @@ impl AppState {
         }
     }
 
-    pub fn play_track(&mut self, track: Track) {
-        self.playback.is_playing = true;
-        self.playback.is_paused = false;
+    pub fn play_track(&mut self, track: Arc<Track>) {
+        self.playback.state = PlayState::Playing;
+        self.clock.sync(0.0);
+        self.clock.set_playing(true);
         self.playback.current_time_sec = 0.0;
         self.playback.duration_sec = track.duration_sec;
 
@@ -546,6 +681,9 @@ impl AppState {
         });
 
         self.playback.current_track = Some(track);
+        self.playback.update_now_playing();
+        self.playback.update_duration_label();
+        self.playback.update_time_label(0.0);
     }
 
     /// Generates a non-repeating Fisher-Yates shuffle deck
@@ -585,9 +723,11 @@ impl AppState {
         if self.playback.shuffle_mode == ShuffleMode::On {
             if self.shuffle_deck.is_empty() {
                 if is_auto_eof && self.playback.loop_mode != LoopMode::All {
-                    self.playback.is_playing = false;
-                    self.playback.is_paused = false;
+                    self.playback.state = PlayState::Stopped;
+                    self.clock.sync(0.0);
+                    self.clock.set_playing(false);
                     self.playback.current_time_sec = 0.0;
+                    self.playback.update_time_label(0.0);
                     return;
                 }
                 self.reset_shuffle_deck();
@@ -613,9 +753,11 @@ impl AppState {
                 }
                 LoopMode::Off | LoopMode::Track => {
                     if is_auto_eof {
-                        self.playback.is_playing = false;
-                        self.playback.is_paused = false;
+                        self.playback.state = PlayState::Stopped;
+                        self.clock.sync(0.0);
+                        self.clock.set_playing(false);
                         self.playback.current_time_sec = 0.0;
+                        self.playback.update_time_label(0.0);
                     } else {
                         self.play_playlist_index(0);
                     }
@@ -630,12 +772,14 @@ impl AppState {
         }
 
         // If more than 3 seconds into track, restart from 0:00
-        if self.playback.current_time_sec > 3.0 {
+        if self.clock.now() > 3.0 {
             let _ = self.cmd_tx.try_send(MpvCommand::Seek {
                 seconds: 0.0,
                 relative: false,
             });
+            self.clock.sync(0.0);
             self.playback.current_time_sec = 0.0;
+            self.playback.update_time_label(0.0);
             return;
         }
 
@@ -669,6 +813,7 @@ impl AppState {
                 match name.as_str() {
                     "time-pos" => {
                         if let Some(num) = val.as_f64() {
+                            self.clock.sync(num);
                             self.playback.current_time_sec = num;
                         }
                         false
@@ -676,19 +821,27 @@ impl AppState {
                     "duration" => {
                         if let Some(num) = val.as_f64() {
                             self.playback.duration_sec = num;
+                            self.playback.update_duration_label();
+                            self.playback.update_time_label(self.clock.now());
                         }
                         true
                     }
                     "pause" => {
                         if let Some(paused) = val.as_bool() {
-                            self.playback.is_paused = paused;
-                            self.playback.is_playing = !paused;
+                            if paused {
+                                self.playback.state = PlayState::Paused;
+                                self.clock.set_playing(false);
+                            } else {
+                                self.playback.state = PlayState::Playing;
+                                self.clock.set_playing(true);
+                            }
                         }
                         true
                     }
                     "volume" => {
                         if let Some(v) = val.as_f64() {
                             self.playback.volume = v;
+                            self.playback.update_vol_label();
                         }
                         true
                     }
@@ -697,8 +850,8 @@ impl AppState {
             }
             MpvEvent::PropertyChange { .. } => false,
             MpvEvent::FileLoaded => {
-                self.playback.is_playing = true;
-                self.playback.is_paused = false;
+                self.playback.state = PlayState::Playing;
+                self.clock.set_playing(true);
                 true
             }
             MpvEvent::EndFile { reason, .. } => {
@@ -708,8 +861,11 @@ impl AppState {
                 true
             }
             MpvEvent::Idle => {
-                self.playback.is_playing = false;
-                self.playback.is_paused = false;
+                self.playback.state = PlayState::Stopped;
+                self.clock.sync(0.0);
+                self.clock.set_playing(false);
+                self.playback.current_time_sec = 0.0;
+                self.playback.update_time_label(0.0);
                 true
             }
             _ => false,
@@ -749,11 +905,11 @@ mod tests {
         let tmp = std::env::temp_dir();
         let mut app = AppState::new(tmp.clone(), cmd_tx, event_tx);
 
-        let t1 = Track::new(1, tmp.join("1.mp3"));
-        let t2 = Track::new(2, tmp.join("2.mp3"));
+        let t1 = Arc::new(Track::new(1, tmp.join("1.mp3")));
+        let t2 = Arc::new(Track::new(2, tmp.join("2.mp3")));
         app.active_playlist = vec![t1, t2];
         app.active_playlist_index = Some(0);
-        app.playback.is_playing = true;
+        app.playback.state = PlayState::Playing;
 
         // Linear advance to index 1
         app.advance_track(false);
@@ -768,15 +924,15 @@ mod tests {
         app.active_playlist_index = Some(1);
         app.playback.loop_mode = LoopMode::Off;
         app.advance_track(true);
-        assert_eq!(app.playback.is_playing, false);
+        assert_eq!(app.playback.is_playing(), false);
 
         // LoopMode::Track repeats track
         app.active_playlist_index = Some(0);
-        app.playback.is_playing = true;
+        app.playback.state = PlayState::Playing;
         app.playback.loop_mode = LoopMode::Track;
         app.advance_track(true);
         assert_eq!(app.active_playlist_index, Some(0));
-        assert_eq!(app.playback.is_playing, true);
+        assert_eq!(app.playback.is_playing(), true);
     }
 
     #[test]
@@ -786,11 +942,11 @@ mod tests {
         let tmp = std::env::temp_dir();
         let mut app = AppState::new(tmp.clone(), cmd_tx, event_tx);
 
-        let t1 = Track::new(1, tmp.join("1.mp3"));
-        let t2 = Track::new(2, tmp.join("2.mp3"));
+        let t1 = Arc::new(Track::new(1, tmp.join("1.mp3")));
+        let t2 = Arc::new(Track::new(2, tmp.join("2.mp3")));
         app.active_playlist = vec![t1, t2];
         app.active_playlist_index = Some(0);
-        app.playback.is_playing = true;
+        app.playback.state = PlayState::Playing;
         app.playback.shuffle_mode = ShuffleMode::On;
         app.playback.loop_mode = LoopMode::Off;
         app.shuffle_deck = vec![1]; // 1 item left in deck
@@ -802,7 +958,7 @@ mod tests {
 
         // Auto EOF with empty deck and LoopMode::Off halts playback
         app.advance_track(true);
-        assert_eq!(app.playback.is_playing, false);
+        assert_eq!(app.playback.is_playing(), false);
     }
 
     #[test]
@@ -813,7 +969,7 @@ mod tests {
         let mut app = AppState::new(tmp.clone(), cmd_tx, event_tx);
 
         let p1 = tmp.join("song.mp3");
-        let t1 = Track::new(1, p1.clone());
+        let t1 = Arc::new(Track::new(1, p1.clone()));
         app.browser_items = vec![BrowserEntry::AudioTrack(t1)];
 
         let patch = crate::event::MetadataPatch {
@@ -861,7 +1017,7 @@ mod tests {
         );
 
         // Setting browser items with a known cached track populates it synchronously
-        let fresh_track = Track::new(1, p1.clone());
+        let fresh_track = Arc::new(Track::new(1, p1.clone()));
         app.set_browser_items(vec![BrowserEntry::AudioTrack(fresh_track)]);
 
         if let BrowserEntry::AudioTrack(t) = &app.browser_items[0] {
@@ -874,6 +1030,24 @@ mod tests {
 
         // Verify that NO background scanner events were triggered since all tracks were cached
         assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_playback_clock_interpolation() {
+        let mut clock = PlaybackClock::new();
+        assert_eq!(clock.now(), 0.0);
+
+        clock.sync(10.0);
+        assert_eq!(clock.now(), 10.0);
+
+        clock.set_playing(true);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        assert!(clock.now() > 10.01);
+
+        clock.set_playing(false);
+        let paused_time = clock.now();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        assert_eq!(clock.now(), paused_time);
     }
 }
 

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use anyhow::Result;
 use crossterm::event::{Event as CrosstermEvent, EventStream, KeyEventKind, MouseButton, MouseEventKind};
-use futures::StreamExt;
+use futures_util::StreamExt;
 use ratatui::layout::Position;
 use tokio::sync::mpsc;
 use tokio::time::{interval, MissedTickBehavior};
@@ -104,8 +104,11 @@ async fn main() -> Result<()> {
 
     // 7. Event Loop Setup
     let mut reader = EventStream::new();
-    let mut ticker = interval(Duration::from_millis(250));
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut display_ticker = interval(Duration::from_millis(250));
+    display_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    let mut resync_ticker = interval(Duration::from_secs(5));
+    resync_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     // Initial draw
     terminal.draw(|f| render_app(f, &mut app, &theme))?;
@@ -180,8 +183,14 @@ async fn main() -> Result<()> {
                         should_render |= dirty;
                     }
                     AppEvent::TimePos(sec) => {
+                        app.clock.sync(sec);
                         app.playback.current_time_sec = sec;
-                        should_render = true;
+                        let current_sec = sec.floor() as u64;
+                        if current_sec != app.last_rendered_sec {
+                            app.last_rendered_sec = current_sec;
+                            app.playback.update_time_label(sec);
+                            should_render = true;
+                        }
                     }
                     AppEvent::DirectoryLoaded { dir, items } if dir == app.current_dir => {
                         app.set_browser_items(items);
@@ -202,8 +211,14 @@ async fn main() -> Result<()> {
                             should_render |= dirty;
                         }
                         AppEvent::TimePos(sec) => {
+                            app.clock.sync(sec);
                             app.playback.current_time_sec = sec;
-                            should_render = true;
+                            let current_sec = sec.floor() as u64;
+                            if current_sec != app.last_rendered_sec {
+                                app.last_rendered_sec = current_sec;
+                                app.playback.update_time_label(sec);
+                                should_render = true;
+                            }
                         }
                         AppEvent::DirectoryLoaded { dir, items } if dir == app.current_dir => {
                             app.set_browser_items(items);
@@ -218,14 +233,25 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Branch 3: Guarded Seekbar Timer (Deactivated when paused or stopped -> 0.0% CPU)
-            // Polls time-pos at 4Hz, eliminating unprompted 50Hz IPC floods from mpv
-            _ = ticker.tick(), if app.is_playing() => {
+            // Branch 3: Guarded Display Cadence Ticker (Active only while playing -> 0.0% idle CPU)
+            // Checks monotonic PlaybackClock; triggers screen redraw ONLY when the displayed second changes (~1 Hz)
+            _ = display_ticker.tick(), if app.is_playing() => {
+                let current_sec = app.clock.now().floor() as u64;
+                if current_sec != app.last_rendered_sec {
+                    app.last_rendered_sec = current_sec;
+                    app.playback.update_time_label(app.clock.now());
+                    should_render = true;
+                }
+            }
+
+            // Branch 4: Periodic mpv Drift Calibration Ticker (Every 5 seconds -> 0.2 Hz IPC)
+            _ = resync_ticker.tick(), if app.is_playing() => {
                 let _ = app.cmd_tx.try_send(MpvCommand::GetTimePos);
             }
         }
     }
 
+    let _ = app.cmd_tx.try_send(MpvCommand::Quit);
     info!("Tunotron exiting gracefully");
     Ok(())
 }

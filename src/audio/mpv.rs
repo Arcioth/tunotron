@@ -134,6 +134,7 @@ pub async fn run_mpv_actor(
     }
 
     let mut next_req_id = 100u64;
+    let mut pending_time_pos_id: Option<u64> = None;
 
     loop {
         tokio::select! {
@@ -148,8 +149,13 @@ pub async fn run_mpv_actor(
                                 }
                                 MpvIncoming::Response(resp) => {
                                     if resp.error == "success" {
-                                        if let Some(num) = resp.data.and_then(|v| v.as_f64()) {
-                                            let _ = event_tx.send(AppEvent::TimePos(num)).await;
+                                        if let Some(req_id) = resp.request_id {
+                                            if pending_time_pos_id == Some(req_id) {
+                                                pending_time_pos_id = None;
+                                                if let Some(num) = resp.data.and_then(|v| v.as_f64()) {
+                                                    let _ = event_tx.send(AppEvent::TimePos(num)).await;
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -169,6 +175,9 @@ pub async fn run_mpv_actor(
             // Commands from application loop
             Some(cmd) = cmd_rx.recv() => {
                 next_req_id += 1;
+                if matches!(cmd, MpvCommand::GetTimePos) {
+                    pending_time_pos_id = Some(next_req_id);
+                }
                 let req = cmd.to_request(Some(next_req_id));
                 if let Ok(json_str) = serde_json::to_string(&req) {
                     if let Err(e) = writer.send(json_str).await {

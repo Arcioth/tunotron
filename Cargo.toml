@@ -1,6 +1,6 @@
 [package]
 name = "tunotron"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 authors = ["Arcioth"]
 description = "A minimal, rock-solid, extensible terminal music player"
@@ -8,19 +8,17 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 # TUI & Terminal Handling
-ratatui = { version = "0.29", features = ["all-widgets"] }
+ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 
 # Async Runtime & Concurrency
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["codec"] }
-futures = "0.3"
-futures-util = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 
-# Serialization & Config
+# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
 
 # Audio Metadata
 lofty = "0.21"
@@ -34,5 +32,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 anyhow = "1.0"
-thiserror = "2.0"
-chrono = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev.package."*"]
+opt-level = 2

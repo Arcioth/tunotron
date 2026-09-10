@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use crate::library::track::Track;
 
 #[derive(Debug, Clone)]
@@ -9,7 +10,7 @@ pub enum BrowserEntry {
         name: String,
         path: PathBuf,
     },
-    AudioTrack(Track),
+    AudioTrack(Arc<Track>),
 }
 
 #[allow(dead_code)]
@@ -101,7 +102,7 @@ pub fn read_directory(dir: &Path, root_boundary: &Path) -> Vec<BrowserEntry> {
 
         items.extend(dirs);
         for track in tracks {
-            items.push(BrowserEntry::AudioTrack(track));
+            items.push(BrowserEntry::AudioTrack(Arc::new(track)));
         }
     }
 
