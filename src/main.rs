@@ -24,7 +24,7 @@ use audio::{run_mpv_actor, MpvCommand, MpvSupervisor};
 use event::AppEvent;
 use keymap::{KeyChord, KeyMap, KeySequenceStateMachine};
 use terminal::TerminalHarness;
-use ui::{render_app, Theme};
+use ui::{render_app, Theme, UiGeom};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -96,8 +96,11 @@ async fn main() -> Result<()> {
     let mut harness = TerminalHarness::init(crash_file)?;
     let terminal = harness.terminal_mut();
 
-    // 6. Initialize Application State & Keymap
+    // 6. Initialize Application State, UI Geometry & Keymap
     let mut app = AppState::new(music_dir, cmd_tx, event_tx.clone());
+    let mut geom = UiGeom::new();
+    geom.clamp_selection(app.browser_items.len());
+
     let keymap = KeyMap::default();
     let mut key_state_machine = KeySequenceStateMachine::new();
     let theme = Theme::catppuccin_mocha();
@@ -111,13 +114,13 @@ async fn main() -> Result<()> {
     resync_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     // Initial draw
-    terminal.draw(|f| render_app(f, &mut app, &theme))?;
+    terminal.draw(|f| render_app(f, &app, &mut geom, &theme))?;
     let mut should_render = false;
 
     // 8. Central Reactive Event Loop (Zero CPU when idle)
     while app.is_running {
         if should_render {
-            terminal.draw(|f| render_app(f, &mut app, &theme))?;
+            terminal.draw(|f| render_app(f, &app, &mut geom, &theme))?;
             should_render = false;
         }
 
@@ -128,36 +131,41 @@ async fn main() -> Result<()> {
                     Some(Ok(CrosstermEvent::Key(key))) if key.kind == KeyEventKind::Press => {
                         let chord = KeyChord::from(key);
                         if let Some(action) = key_state_machine.feed(chord, &keymap) {
-                            app.handle_action(action);
+                            app.handle_action(action, &mut geom);
                             should_render = true;
                         }
                     }
                     Some(Ok(CrosstermEvent::Mouse(mouse))) => {
                         match mouse.kind {
                             MouseEventKind::ScrollDown => {
-                                app.handle_action(Action::MoveDown(2));
+                                app.handle_action(Action::MoveDown(2), &mut geom);
                                 should_render = true;
                             }
                             MouseEventKind::ScrollUp => {
-                                app.handle_action(Action::MoveUp(2));
+                                app.handle_action(Action::MoveUp(2), &mut geom);
                                 should_render = true;
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
-                                if app.show_help {
-                                    // Modal eats clicks; do not hit-test widgets underneath
+                                let pos = Position { x: mouse.column, y: mouse.row };
+                                if geom.has_window() {
+                                    // Modal click handling: click outside dismisses top modal
+                                    if !geom.modal_rect.contains(pos) {
+                                        geom.pop_window();
+                                        should_render = true;
+                                    }
+                                    // Shield background widgets from clicks
                                     continue;
                                 }
-                                let pos = Position { x: mouse.column, y: mouse.row };
-                                if app.progress_rect.contains(pos) {
-                                    let relative_x = mouse.column.saturating_sub(app.progress_rect.x) as f64;
-                                    let denom = app.progress_rect.width.max(1).saturating_sub(1).max(1) as f64;
+                                if geom.progress_rect.contains(pos) {
+                                    let relative_x = mouse.column.saturating_sub(geom.progress_rect.x) as f64;
+                                    let denom = geom.progress_rect.width.max(1).saturating_sub(1).max(1) as f64;
                                     let ratio = (relative_x / denom).clamp(0.0, 1.0);
-                                    app.handle_action(Action::SeekRatio(ratio));
+                                    app.handle_action(Action::SeekRatio(ratio), &mut geom);
                                     should_render = true;
-                                } else if app.browser_rows_rect.contains(pos) {
-                                    let visual = (mouse.row.saturating_sub(app.browser_rows_rect.y)) as usize;
-                                    let idx = app.table_state.offset() + visual;
-                                    app.handle_action(Action::SelectIndex(idx));
+                                } else if geom.browser_rows_rect.contains(pos) {
+                                    let visual = (mouse.row.saturating_sub(geom.browser_rows_rect.y)) as usize;
+                                    let idx = geom.scroll_offset() + visual;
+                                    app.handle_action(Action::SelectIndex(idx), &mut geom);
                                     should_render = true;
                                 }
                             }
@@ -194,6 +202,7 @@ async fn main() -> Result<()> {
                     }
                     AppEvent::DirectoryLoaded { dir, items } if dir == app.current_dir => {
                         app.set_browser_items(items);
+                        geom.clamp_selection(app.browser_items.len());
                         should_render = true;
                     }
                     AppEvent::Scanner(event::ScannerEvent::Batch(patches)) => {
@@ -222,6 +231,7 @@ async fn main() -> Result<()> {
                         }
                         AppEvent::DirectoryLoaded { dir, items } if dir == app.current_dir => {
                             app.set_browser_items(items);
+                            geom.clamp_selection(app.browser_items.len());
                             should_render = true;
                         }
                         AppEvent::Scanner(event::ScannerEvent::Batch(patches)) => {

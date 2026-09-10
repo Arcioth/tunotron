@@ -2,13 +2,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use ratatui::layout::Rect;
-use ratatui::widgets::TableState;
 use tokio::sync::mpsc;
 
-use crate::action::{Action, LoopMode, ShuffleMode};
+use crate::action::{Action, LoopMode, ShuffleMode, WindowId};
 use crate::audio::{MpvCommand, MpvEvent};
 use crate::library::{read_directory, resolve_in_jail, BrowserEntry, Track};
+use crate::ui::UiGeom;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewDensity {
@@ -178,7 +177,6 @@ pub struct AppState {
     pub music_root: PathBuf,
     pub current_dir: PathBuf,
     pub browser_items: Vec<BrowserEntry>,
-    pub table_state: TableState,
     pub active_playlist: Vec<Arc<Track>>,
     pub active_playlist_index: Option<usize>,
     pub active_playlist_dir: Option<PathBuf>,
@@ -192,11 +190,7 @@ pub struct AppState {
     pub metadata_cache: HashMap<PathBuf, crate::event::MetadataPatch>,
     pub cmd_tx: mpsc::Sender<MpvCommand>,
     pub event_tx: mpsc::Sender<crate::event::AppEvent>,
-    pub show_help: bool,
     pub density: ViewDensity,
-    pub browser_rect: Rect,
-    pub browser_rows_rect: Rect,
-    pub progress_rect: Rect,
 }
 
 impl AppState {
@@ -213,7 +207,6 @@ impl AppState {
             music_root: canonical_root.clone(),
             current_dir: canonical_root.clone(),
             browser_items: Vec::new(),
-            table_state: TableState::default(),
             active_playlist: Vec::new(),
             active_playlist_index: None,
             active_playlist_dir: None,
@@ -227,11 +220,7 @@ impl AppState {
             metadata_cache: HashMap::new(),
             cmd_tx,
             event_tx,
-            show_help: false,
             density: ViewDensity::Comfortable,
-            browser_rect: Rect::default(),
-            browser_rows_rect: Rect::default(),
-            progress_rect: Rect::default(),
         };
 
         let initial_items = read_directory(&canonical_root, &canonical_root);
@@ -258,7 +247,6 @@ impl AppState {
 
     /// Sets new browser items, applying cached metadata immediately and only scanning uncached tracks
     pub fn set_browser_items(&mut self, mut items: Vec<BrowserEntry>) {
-        let old_selected = self.table_state.selected().unwrap_or(0);
         let mut missing_paths = Vec::new();
 
         // 1. Immediately apply cached metadata to tracks
@@ -290,13 +278,6 @@ impl AppState {
 
         self.browser_items = items;
         self.browser_title = format!(" Music Browser ({} items) ", self.browser_items.len());
-
-        if self.browser_items.is_empty() {
-            self.table_state.select(None);
-        } else {
-            let next_idx = old_selected.min(self.browser_items.len() - 1);
-            self.table_state.select(Some(next_idx));
-        }
 
         // 2. Only spawn background probe for paths that are NOT in the cache
         if !missing_paths.is_empty() {
@@ -391,12 +372,16 @@ impl AppState {
         }
     }
 
-    pub fn handle_action(&mut self, action: Action) {
-        // If modal window is open, handle window dismissal
-        if self.show_help {
+    pub fn handle_action(&mut self, action: Action, geom: &mut UiGeom) {
+        // If modal window is open, handle window dismissal and consume input
+        if geom.has_window() {
             match action {
-                Action::CloseTopWindow | Action::ToggleHelp => {
-                    self.show_help = false;
+                Action::CloseTopWindow => {
+                    geom.pop_window();
+                    return;
+                }
+                Action::ToggleHelp if geom.top_window() == Some(WindowId::Help) => {
+                    geom.pop_window();
                     return;
                 }
                 Action::Quit => {
@@ -414,10 +399,13 @@ impl AppState {
                 let _ = self.cmd_tx.try_send(MpvCommand::Quit);
             }
             Action::ToggleHelp => {
-                self.show_help = true;
+                geom.toggle_window(WindowId::Help);
+            }
+            Action::OpenWindow(id) => {
+                geom.push_window(id);
             }
             Action::CloseTopWindow => {
-                self.show_help = false;
+                geom.pop_window();
             }
             Action::ToggleDensity => {
                 self.density = self.density.toggle();
@@ -433,7 +421,7 @@ impl AppState {
                         if resolve_in_jail(&self.music_root, &parent).is_some() {
                             self.current_dir = parent;
                             self.reload_current_directory();
-                            self.table_state.select(Some(0));
+                            geom.select(Some(0));
                         }
                     }
                 }
@@ -441,17 +429,15 @@ impl AppState {
 
             // Locate currently playing song
             Action::LocatePlayingTrack => {
-                self.locate_playing_track();
+                self.locate_playing_track(geom);
             }
 
             Action::SelectIndex(idx) => {
-                if idx < self.browser_items.len() {
-                    self.table_state.select(Some(idx));
-                }
+                geom.select_index(idx, self.browser_items.len());
             }
 
             Action::EnterDirectory | Action::PlaySelected => {
-                self.enter_selected();
+                self.enter_selected(geom);
             }
             Action::PlayTrackIndex(idx) => {
                 if idx < self.active_playlist.len() {
@@ -534,66 +520,49 @@ impl AppState {
 
             // Motions
             Action::MoveDown(count) => {
-                let total = self.browser_items.len();
-                if total > 0 {
-                    let current = self.table_state.selected().unwrap_or(0);
-                    let next = (current + count).min(total - 1);
-                    self.table_state.select(Some(next));
-                }
+                geom.move_down(count, self.browser_items.len());
             }
             Action::MoveUp(count) => {
-                let current = self.table_state.selected().unwrap_or(0);
-                let prev = current.saturating_sub(count);
-                self.table_state.select(Some(prev));
+                geom.move_up(count);
             }
             Action::MoveToTop => {
-                if !self.browser_items.is_empty() {
-                    self.table_state.select(Some(0));
-                }
+                geom.move_to_top();
             }
             Action::MoveToBottom => {
-                let total = self.browser_items.len();
-                if total > 0 {
-                    self.table_state.select(Some(total - 1));
-                }
+                geom.move_to_bottom(self.browser_items.len());
             }
             Action::HalfPageDown => {
-                let step = (self.browser_rows_rect.height / 2).max(1) as usize;
-                let total = self.browser_items.len();
-                if total > 0 {
-                    let current = self.table_state.selected().unwrap_or(0);
-                    let next = (current + step).min(total - 1);
-                    self.table_state.select(Some(next));
-                }
+                let step = (geom.browser_rows_rect.height / 2).max(1) as usize;
+                geom.move_down(step, self.browser_items.len());
             }
             Action::HalfPageUp => {
-                let step = (self.browser_rows_rect.height / 2).max(1) as usize;
-                let current = self.table_state.selected().unwrap_or(0);
-                let prev = current.saturating_sub(step);
-                self.table_state.select(Some(prev));
+                let step = (geom.browser_rows_rect.height / 2).max(1) as usize;
+                geom.move_up(step);
             }
 
-            // Extension custom hook
-            Action::Custom(_) => {}
+            // Extension Action Seam
+            Action::Plugin { plugin_id, name, payload } => {
+                tracing::debug!("Received plugin action: [{}] {} {:?}", plugin_id, name, payload);
+            }
         }
     }
 
-    pub fn enter_selected(&mut self) {
-        let Some(idx) = self.table_state.selected() else { return };
+    pub fn enter_selected(&mut self, geom: &mut UiGeom) {
+        let Some(idx) = geom.selected() else { return };
         match self.browser_items.get(idx) {
             Some(BrowserEntry::ParentDir(parent_path)) => {
                 let parent_path = parent_path.clone();
                 if resolve_in_jail(&self.music_root, &parent_path).is_some() {
                     self.current_dir = parent_path;
                     self.reload_current_directory();
-                    self.table_state.select(Some(0));
+                    geom.select(Some(0));
                 }
             }
             Some(BrowserEntry::Directory { path, .. }) => {
                 let Some(jailed_path) = resolve_in_jail(&self.music_root, path) else { return };
                 self.current_dir = jailed_path;
                 self.reload_current_directory();
-                self.table_state.select(Some(0));
+                geom.select(Some(0));
             }
             Some(BrowserEntry::AudioTrack(track)) => {
                 let track = track.clone();
@@ -603,7 +572,7 @@ impl AppState {
         }
     }
 
-    pub fn locate_playing_track(&mut self) {
+    pub fn locate_playing_track(&mut self, geom: &mut UiGeom) {
         if let Some(track) = &self.playback.current_track {
             let track_path = track.path.clone();
             if let Some(folder) = track_path.parent() {
@@ -615,7 +584,7 @@ impl AppState {
 
                 // Locate and highlight the track row
                 if let Some(pos) = self.browser_items.iter().position(|e| e.path() == track_path) {
-                    self.table_state.select(Some(pos));
+                    geom.select(Some(pos));
                 }
             }
         }
@@ -924,7 +893,7 @@ mod tests {
         app.active_playlist_index = Some(1);
         app.playback.loop_mode = LoopMode::Off;
         app.advance_track(true);
-        assert_eq!(app.playback.is_playing(), false);
+        assert!(!app.playback.is_playing());
 
         // LoopMode::Track repeats track
         app.active_playlist_index = Some(0);
@@ -932,7 +901,7 @@ mod tests {
         app.playback.loop_mode = LoopMode::Track;
         app.advance_track(true);
         assert_eq!(app.active_playlist_index, Some(0));
-        assert_eq!(app.playback.is_playing(), true);
+        assert!(app.playback.is_playing());
     }
 
     #[test]
@@ -958,7 +927,7 @@ mod tests {
 
         // Auto EOF with empty deck and LoopMode::Off halts playback
         app.advance_track(true);
-        assert_eq!(app.playback.is_playing(), false);
+        assert!(!app.playback.is_playing());
     }
 
     #[test]

@@ -5,12 +5,14 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Cell, Gauge, Paragraph, Row, Table},
     Frame,
 };
+use crate::action::WindowId;
 use crate::app::{AppState, ViewDensity};
 use crate::library::BrowserEntry;
+use crate::ui::geom::UiGeom;
 use crate::ui::theme::Theme;
 use crate::ui::window::render_help_modal;
 
-pub fn render_app(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
+pub fn render_app(frame: &mut Frame, state: &AppState, geom: &mut UiGeom, theme: &Theme) {
     let size = frame.area();
 
     let chunks = Layout::default()
@@ -23,15 +25,21 @@ pub fn render_app(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         .split(size);
 
     // Save hitboxes for mouse clicks
-    state.browser_rect = chunks[1];
+    geom.browser_rect = chunks[1];
 
     render_header(frame, chunks[0], state, theme);
-    render_browser_table(frame, chunks[1], state, theme);
-    render_player_bar(frame, chunks[2], state, theme);
+    render_browser_table(frame, chunks[1], state, geom, theme);
+    render_player_bar(frame, chunks[2], state, geom, theme);
 
-    // Floating Window Layer
-    if state.show_help {
-        render_help_modal(frame, size, theme);
+    // Floating Window Stack Layer
+    if let Some(top_window) = geom.top_window() {
+        match top_window {
+            WindowId::Help => {
+                geom.modal_rect = render_help_modal(frame, size, theme);
+            }
+        }
+    } else {
+        geom.modal_rect = Rect::default();
     }
 }
 
@@ -63,7 +71,7 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
     frame.render_widget(paragraph, area);
 }
 
-fn render_browser_table(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
+fn render_browser_table(frame: &mut Frame, area: Rect, state: &AppState, geom: &mut UiGeom, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -72,7 +80,7 @@ fn render_browser_table(frame: &mut Frame, area: Rect, state: &mut AppState, the
 
     let inner = block.inner(area);
     let header_h: u16 = 1 + if state.density == ViewDensity::Compact { 0 } else { 1 };
-    state.browser_rows_rect = Rect {
+    geom.browser_rows_rect = Rect {
         x: inner.x,
         y: inner.y.saturating_add(header_h),
         width: inner.width,
@@ -166,10 +174,10 @@ fn render_browser_table(frame: &mut Frame, area: Rect, state: &mut AppState, the
         .row_highlight_style(highlight_style)
         .highlight_symbol("▶ ");
 
-    frame.render_stateful_widget(table, area, &mut state.table_state);
+    frame.render_stateful_widget(table, area, &mut geom.table_state);
 }
 
-fn render_player_bar(frame: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
+fn render_player_bar(frame: &mut Frame, area: Rect, state: &AppState, geom: &mut UiGeom, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -179,7 +187,7 @@ fn render_player_bar(frame: &mut Frame, area: Rect, state: &mut AppState, theme:
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    state.progress_rect = Rect::default();
+    geom.progress_rect = Rect::default();
     if inner.height < 2 {
         return;
     }
@@ -190,7 +198,7 @@ fn render_player_bar(frame: &mut Frame, area: Rect, state: &mut AppState, theme:
         .split(inner);
 
     // Save progress bar hitbox for mouse clicks
-    state.progress_rect = sub_chunks[1];
+    geom.progress_rect = sub_chunks[1];
 
     // Row 1: Status Icon + Title + Artist + Loop/Shuffle + Volume (Zero heap allocations)
     let status_icon = if state.playback.is_playing() {

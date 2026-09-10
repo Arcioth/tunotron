@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.1] - 2026-09-10 — Phase 2.5 Pre-Plugin Architecture & Pure Projection Rendering
+
+Following an architectural review, this release implements Phase 2.5 architectural guardrails, establishing pure projection rendering, typed window compositing, and sandboxed action capability boundaries in preparation for the Lua 5.4 (`mlua`) plugin engine.
+
+### 🧩 UI Geometry Decoupling & Pure Projections
+- **Separated `UiGeom` from `AppState`:** Extracted all viewport motions, table selection state (`TableState`), layout hitboxes (`Rect`), and modal window tracking into a dedicated `UiGeom` struct.
+- **Pure Projection Rendering:** `render_app` now takes `(&AppState, &mut UiGeom, &Theme)`. Domain state (`AppState`) is 100% immutable during render—eliminating mutations during draw and enabling safe zero-copy snapshotting.
+
+### 🪟 Typed Window Stack Compositor
+- **Replaced `show_help: bool`:** Modal windows are now managed by a typed stack (`window_stack: Vec<WindowId>`).
+- **Ergonomic Compositing:** Full stack operations: `push_window`, `pop_window`, `toggle_window`, and `close_top_window`.
+- **Click Shielding & Dismissal:** Mouse clicks outside the active modal window automatically dismiss it; clicks inside the modal are shielded from activating background widgets.
+
+### 🔒 Typed Plugin Actions & Capability Gating Seam
+- **Typed `Action::Plugin`:** Replaced generic `Action::Custom(String)` with `Action::Plugin { plugin_id, name, payload }`.
+- **Action Envelope & Origin Tagging:** Introduced `ActionSource` (`User`, `Internal`, `Plugin(String)`) and `ActionEnvelope`.
+- **Capability Matrix:** Added `Capability` enum (`PlaybackControl`, `PlaybackQueue`, `UiOverlay`, `FsJailRead`, `FsJailWrite`, `KeyBind`) with `Action::required_capability()` and `ActionSource::is_permitted()`. Plugins are permanently barred from issuing destructive actions (such as `Quit`).
+
+### 🧪 Automated Testing
+- Expanded test suite to **15 passed tests, 0 warnings**:
+  - `test_selection_motions_and_bounds`: verifies selection clamping, bounds, and viewport jumps.
+  - `test_window_stack_push_pop_toggle`: verifies window stack push, pop, deduplication, and toggle.
+  - `test_action_source_permissions`: verifies user vs plugin capability verification.
+  - `test_required_capabilities`: verifies action-to-capability permission mapping.
+
+---
+
 ## [0.3.0] - 2026-09-10 — Monotonic Interpolation, Zero-Alloc Player Bar & Architecture Polish
 
 Following a detailed systems review, this release reduces IPC overhead by another 20×, eliminates all remaining per-frame heap allocations, fixes IPC request-response correlation, adds zero-copy playlist switching with `Arc<Track>`, and trims binary footprint down to 3.1 MB.

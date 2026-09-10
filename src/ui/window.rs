@@ -31,7 +31,7 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 /// Renders the built-in Help floating window
-pub fn render_help_modal(frame: &mut Frame, area: Rect, theme: &Theme) {
+pub fn render_help_modal(frame: &mut Frame, area: Rect, theme: &Theme) -> Rect {
     let popup_area = centered_rect(65, 65, area);
 
     // Clear background behind modal to prevent text bleed
@@ -122,4 +122,5 @@ pub fn render_help_modal(frame: &mut Frame, area: Rect, theme: &Theme) {
         .alignment(Alignment::Left);
 
     frame.render_widget(paragraph, popup_area);
+    popup_area
 }
