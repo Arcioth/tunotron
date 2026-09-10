@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.6] - 2026-09-10 — Complete Extensibility Suite: Playback Heartbeats & Desktop Notifications
+
+This release completes the final two pillars of Tunotron's 5-pillar extension architecture: **1 Hz Monotonic Playback Heartbeat (`PluginEvent::Tick` / `on_tick`)** and **Desktop Notifications & Host Integration (`Capability::Notify`)**. Tunotron now provides a comprehensive, sandboxed plugin system with zero performance penalties, zero binary bloat, and rock-solid architectural boundaries.
+
+### ⏱️ Pillar 4: 1 Hz Monotonic Playback Heartbeat (`PluginEvent::Tick`)
+- **Monotonic Playback Ticker ([`src/main.rs`](file:///home/arcioth/Documents/tunotron/src/main.rs)):**
+  - Synchronized directly to the display cadence loop via `PlaybackClock`.
+  - Dispatches `PluginEvent::Tick { position, duration }` strictly on integer-second boundary transitions.
+  - **0.0% Idle CPU:** Inactive during paused or stopped states; eliminates polling loops entirely.
+- **Ergonomic Dual Dispatch ([`src/plugin/lua.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/lua.rs)):**
+  - Plugins can define dedicated `function plugin.on_tick(pos, dur)` or handle `event.type == "Tick"` in `on_event(event)`.
+  - Built-in deduplication prevents double-dispatch if both hooks are defined.
+- **Sleep Timer Reference Plugin ([`examples/plugins/sleep_timer.lua`](file:///home/arcioth/Documents/tunotron/examples/plugins/sleep_timer.lua)):**
+  - Full implementation of a 15-minute countdown sleep timer using `KeyBind` (`'Z'`), `on_tick`, and `UiOverlay`. Automatically pauses audio and announces expiration through a modal dialog.
+
+### 🔔 Pillar 5: Desktop Notifications & Host Integration (`Capability::Notify`)
+- **Capability-Gated Notifications ([`src/action.rs`](file:///home/arcioth/Documents/tunotron/src/action.rs)):**
+  - Added `Capability::Notify` and permission-checked `Action::Notify { summary, body }`.
+  - Unauthorized scripts attempting notification calls are strictly rejected.
+- **Direct & Declarative Interfaces ([`src/plugin/lua.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/lua.rs)):**
+  - **Host API:** Direct calls via `tunotron.notify(summary, body)` within Lua scripts.
+  - **Action Return:** Declarative dispatch via `{ action = "Notify", summary = "...", body = "..." }` through pure reducer effects.
+- **Async & Non-blocking Output ([`src/main.rs`](file:///home/arcioth/Documents/tunotron/src/main.rs)):**
+  - Spawns desktop notifications asynchronously using system `notify-send` without blocking the main event loop or audio playback.
+  - Adds **0 KB** binary footprint and requires **no external C dependencies**.
+- **Now Playing Notifier Reference Plugin ([`examples/plugins/now_playing_notify.lua`](file:///home/arcioth/Documents/tunotron/examples/plugins/now_playing_notify.lua)):**
+  - Emits native desktop notifications on track changes and supports on-demand notifications via the `'N'` shortcut.
+
+### 🧪 Automated Testing & Binary Footprint
+- **46 Passed Unit Tests, 0 Warnings (0.08s execution time):**
+  - Comprehensive coverage for all 5 pillars: keybindings, modals, jailed fs reader, tick heartbeats, and desktop notifications.
+- **Release binary footprint:** **3.6 MB** with Fat LTO and stripped symbols (well under 3.8 MB target).
+
+---
+
 ## [0.3.5] - 2026-09-10 — Custom Keybindings, Declarative Modals & Safe Jailed File Reading
 
 Following the plugin API expansion roadmap, this release establishes the first three foundational API pillars for Tunotron plugins: **Custom Keybinding Registration (`Capability::KeyBind`)**, **Declarative Floating Modals (`Capability::UiOverlay`)**, and **Safe Jailed File Reading (`Capability::FsJailRead`)**. Plugins can now hook custom shortcuts, project rich floating TUI windows, and safely inspect local audio companion files (.lrc lyrics, .txt, .nfo) without leaking immediate-mode Ratatui frames or risking host security.

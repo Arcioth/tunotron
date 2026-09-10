@@ -14,6 +14,10 @@ pub enum Effect {
         name: String,
         payload: serde_json::Value,
     },
+    Notify {
+        summary: String,
+        body: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -132,6 +136,12 @@ pub enum Action {
         payload: serde_json::Value,
     },
 
+    // Host & Integration
+    Notify {
+        summary: String,
+        body: String,
+    },
+
     // Application
     Quit,
 }
@@ -144,6 +154,7 @@ pub enum Capability {
     FsJailRead,
     FsJailWrite,
     KeyBind,
+    Notify,
 }
 
 impl std::str::FromStr for Capability {
@@ -157,6 +168,7 @@ impl std::str::FromStr for Capability {
             "FsJailRead" => Ok(Capability::FsJailRead),
             "FsJailWrite" => Ok(Capability::FsJailWrite),
             "KeyBind" => Ok(Capability::KeyBind),
+            "Notify" => Ok(Capability::Notify),
             other => Err(format!("Unknown capability: {}", other)),
         }
     }
@@ -171,6 +183,7 @@ impl Capability {
             Capability::FsJailRead => "FsJailRead",
             Capability::FsJailWrite => "FsJailWrite",
             Capability::KeyBind => "KeyBind",
+            Capability::Notify => "Notify",
         }
     }
 }
@@ -209,6 +222,8 @@ impl Action {
             | Action::CloseTopWindow
             | Action::ToggleDensity
             | Action::ShowModal { .. } => ActionPermission::Capability(Capability::UiOverlay),
+
+            Action::Notify { .. } => ActionPermission::Capability(Capability::Notify),
 
             Action::MoveDown(_)
             | Action::MoveUp(_)
@@ -336,5 +351,20 @@ mod tests {
         assert!(!plugin.is_permitted(&action, &[]));
         assert!(!plugin.is_permitted(&action, &[Capability::PlaybackControl]));
         assert!(plugin.is_permitted(&action, &[Capability::UiOverlay]));
+    }
+
+    #[test]
+    fn test_notify_capability_permission() {
+        let action = Action::Notify {
+            summary: "Now Playing".to_string(),
+            body: "Artist - Title".to_string(),
+        };
+        assert_eq!(action.permission(), ActionPermission::Capability(Capability::Notify));
+        assert_eq!(action.required_capability(), Some(Capability::Notify));
+
+        let plugin = ActionSource::Plugin("org.tunotron.notifier".into());
+        assert!(!plugin.is_permitted(&action, &[]));
+        assert!(!plugin.is_permitted(&action, &[Capability::PlaybackControl, Capability::UiOverlay]));
+        assert!(plugin.is_permitted(&action, &[Capability::Notify]));
     }
 }

@@ -74,8 +74,9 @@ impl LuaPlugin {
 
         let manifest = PluginManifest::new(id, name, version, description, capabilities).with_keybinds(keybinds);
 
-        // 5. Attach capability-gated host APIs (e.g. jailed filesystem reader)
+        // 5. Attach capability-gated host APIs (e.g. jailed filesystem reader, desktop notifications)
         attach_jailed_fs_api(&lua, &manifest, music_root)?;
+        attach_notify_api(&lua, &manifest)?;
 
         // Store plugin table in Lua registry so we can retrieve its callbacks
         let _ = lua.set_named_registry_value("__tunotron_plugin_table", plugin_tbl);
@@ -268,6 +269,33 @@ fn attach_jailed_fs_api(
     Ok(())
 }
 
+fn attach_notify_api(lua: &Lua, manifest: &PluginManifest) -> Result<(), String> {
+    let globals = lua.globals();
+    let tunotron_tbl: Table = globals.get("tunotron").map_err(|e| e.to_string())?;
+
+    let has_notify_cap = manifest.capabilities.contains(&Capability::Notify);
+    let notify_fn = lua
+        .create_function(move |_, (summary, body): (String, Option<String>)| {
+            if !has_notify_cap {
+                return Ok((false, Some("Permission denied: missing Capability::Notify".to_string())));
+            }
+            let body_str = body.unwrap_or_default();
+            let res = std::process::Command::new("notify-send")
+                .arg("--app-name=Tunotron")
+                .arg(&summary)
+                .arg(&body_str)
+                .spawn();
+            match res {
+                Ok(_) => Ok((true, None::<String>)),
+                Err(e) => Ok((false, Some(format!("Failed to spawn notify-send: {}", e)))),
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    tunotron_tbl.set("notify", notify_fn).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn parse_actions_from_value(val: Value) -> Vec<Action> {
     match val {
         Value::Table(ref tbl) => {
@@ -342,6 +370,11 @@ fn parse_table_action(tbl: &Table) -> Option<Action> {
             let title: String = tbl.get("title").unwrap_or_else(|_| "Notification".to_string());
             let content: String = tbl.get("content").unwrap_or_default();
             Some(Action::ShowModal { title, content })
+        }
+        "Notify" => {
+            let summary: String = tbl.get("summary").unwrap_or_else(|_| "Tunotron".to_string());
+            let body: String = tbl.get("body").unwrap_or_default();
+            Some(Action::Notify { summary, body })
         }
         "Quit" => Some(Action::Quit),
         "Seek" => {
@@ -862,6 +895,103 @@ mod tests {
                 assert!(content.contains("Playback has been paused"));
             }
             other => panic!("Expected Action::ShowModal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_lua_plugin_notify_permission_denied() {
+        let script = r#"
+            local p = {}
+            p.manifest = {
+                id = "org.tunotron.nonotify",
+                name = "No Notify",
+                version = "0.1.0",
+                description = "Missing notify capability",
+                capabilities = {}
+            }
+            function p.on_action(name, payload)
+                local ok, err = tunotron.notify("Test", "Should fail")
+                if not ok and string.find(err, "missing Capability::Notify") then
+                    return { action = "ToggleHelp" }
+                end
+                return {}
+            end
+            return p
+        "#;
+
+        let mut plugin = LuaPlugin::from_script(script, "nonotify.lua").unwrap();
+        let actions = plugin.on_action("test", &serde_json::json!({}));
+        assert_eq!(actions, vec![Action::ToggleHelp]);
+    }
+
+    #[test]
+    fn test_lua_plugin_notify_action_emission() {
+        let script = r#"
+            local p = {}
+            p.manifest = {
+                id = "org.tunotron.notifytest",
+                name = "Notify Test",
+                version = "0.1.0",
+                description = "Tests notify action emission",
+                capabilities = { "Notify" }
+            }
+            function p.on_action(name, payload)
+                return {
+                    action = "Notify",
+                    summary = "Now Playing",
+                    body = "Pink Floyd - Echoes"
+                }
+            end
+            return p
+        "#;
+
+        let mut plugin = LuaPlugin::from_script(script, "notify_test.lua").unwrap();
+        let actions = plugin.on_action("alert", &serde_json::json!({}));
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0],
+            Action::Notify {
+                summary: "Now Playing".to_string(),
+                body: "Pink Floyd - Echoes".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_now_playing_notify_example_plugin() {
+        let plugin_path = Path::new("examples/plugins/now_playing_notify.lua");
+        let mut plugin = LuaPlugin::from_file(plugin_path, None).unwrap();
+
+        // 1. Simulate track changed event
+        let ev = PluginEvent::TrackChanged {
+            track_id: crate::library::track::TrackId(1),
+            title: "Time".into(),
+            artist: "Pink Floyd".into(),
+            album: "The Dark Side of the Moon".into(),
+            duration_sec: 425.0,
+            path: PathBuf::from("/music/time.flac"),
+        };
+        let actions = plugin.on_event(&ev);
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            Action::Notify { summary, body } => {
+                assert_eq!(summary, "Time");
+                assert!(body.contains("Pink Floyd"));
+                assert!(body.contains("The Dark Side of the Moon"));
+                assert!(body.contains("[07:05]"));
+            }
+            other => panic!("Expected Action::Notify, got {:?}", other),
+        }
+
+        // 2. Trigger 'N' keybind action
+        let actions = plugin.on_action("show_now_playing", &serde_json::json!({}));
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            Action::Notify { summary, body } => {
+                assert_eq!(summary, "Time");
+                assert!(body.contains("Pink Floyd"));
+            }
+            other => panic!("Expected Action::Notify, got {:?}", other),
         }
     }
 }

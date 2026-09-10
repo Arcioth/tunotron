@@ -372,6 +372,9 @@ impl AppState {
                     geom.open_modal(title, content);
                     return Vec::new();
                 }
+                Action::Notify { summary, body } => {
+                    return vec![Effect::Notify { summary, body }];
+                }
                 Action::Quit => {
                     self.is_running = false;
                     return vec![Effect::Mpv(MpvCommand::Quit)];
@@ -551,6 +554,10 @@ impl AppState {
             Action::Plugin { plugin_id, name, payload } => {
                 tracing::debug!("Received plugin action: [{}] {} {:?}", plugin_id, name, payload);
                 vec![Effect::PluginAction { plugin_id, name, payload }]
+            }
+
+            Action::Notify { summary, body } => {
+                vec![Effect::Notify { summary, body }]
             }
         }
     }
@@ -1101,6 +1108,29 @@ mod tests {
         assert!(effects.is_empty());
         assert!(!geom.has_window());
         assert_eq!(geom.modal_content, None);
+    }
+
+    #[test]
+    fn test_notify_reducer_effects() {
+        let temp_dir = std::env::temp_dir();
+        let (mut app, _) = AppState::new(temp_dir);
+        let mut geom = UiGeom::default();
+
+        let effects = app.reduce(
+            Action::Notify {
+                summary: "Title".to_string(),
+                body: "Body text".to_string(),
+            },
+            &mut geom,
+        );
+
+        assert_eq!(
+            effects,
+            vec![Effect::Notify {
+                summary: "Title".to_string(),
+                body: "Body text".to_string(),
+            }]
+        );
     }
 }
 

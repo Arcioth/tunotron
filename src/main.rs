@@ -379,6 +379,18 @@ fn execute_effects(
                     let _ = event_tx.try_send(AppEvent::Action(env));
                 }
             }
+            Effect::Notify { summary, body } => {
+                tokio::spawn(async move {
+                    let res = tokio::process::Command::new("notify-send")
+                        .arg("--app-name=Tunotron")
+                        .arg(&summary)
+                        .arg(&body)
+                        .spawn();
+                    if let Err(e) = res {
+                        tracing::warn!("Failed to dispatch desktop notification: {}", e);
+                    }
+                });
+            }
         }
     }
 }
