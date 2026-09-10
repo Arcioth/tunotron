@@ -28,11 +28,11 @@ impl BrowserEntry {
 }
 
 /// Canonical jail resolver: returns Some(canonical_path) if and only if
-/// the candidate path resides strictly within the root directory.
-pub fn resolve_in_jail(root: &Path, candidate: &Path) -> Option<PathBuf> {
-    let canon_root = root.canonicalize().ok()?;
+/// the candidate path resides strictly within the canonical root directory.
+/// Note: `canonical_root` is expected to be already canonicalized.
+pub fn resolve_in_jail(canonical_root: &Path, candidate: &Path) -> Option<PathBuf> {
     let canon_cand = candidate.canonicalize().ok()?;
-    if canon_cand == canon_root || canon_cand.starts_with(&canon_root) {
+    if canon_cand == canonical_root || canon_cand.starts_with(canonical_root) {
         Some(canon_cand)
     } else {
         None
@@ -54,7 +54,6 @@ pub fn read_directory(dir: &Path, root_boundary: &Path) -> Vec<BrowserEntry> {
     if let Ok(entries) = fs::read_dir(dir) {
         let mut dirs = Vec::new();
         let mut tracks = Vec::new();
-        let mut track_id = 0;
 
         for entry in entries.filter_map(|e| e.ok()) {
             let ft = match entry.file_type() {
@@ -74,8 +73,7 @@ pub fn read_directory(dir: &Path, root_boundary: &Path) -> Vec<BrowserEntry> {
                     dirs.push(BrowserEntry::Directory { name, path: jailed_dir });
                 }
             } else if ft.is_file() && Track::is_audio_file(&path) {
-                track_id += 1;
-                let track = Track::new(track_id, path);
+                let track = Track::new(0, path);
                 tracks.push(track);
             }
         }
@@ -95,6 +93,11 @@ pub fn read_directory(dir: &Path, root_boundary: &Path) -> Vec<BrowserEntry> {
                 _ => ascii_case_cmp(&a.filename, &b.filename),
             }
         });
+
+        // Assign sequential IDs after sorting so Track::id matches display order
+        for (i, track) in tracks.iter_mut().enumerate() {
+            track.id = i + 1;
+        }
 
         items.extend(dirs);
         for track in tracks {
@@ -130,17 +133,19 @@ mod tests {
         let sub = jail_root.join("sub");
         let _ = std::fs::create_dir_all(&sub);
 
+        let canonical_root = jail_root.canonicalize().unwrap();
+
         // Child is allowed
-        let resolved_sub = resolve_in_jail(&jail_root, &sub);
+        let resolved_sub = resolve_in_jail(&canonical_root, &sub);
         assert!(resolved_sub.is_some());
 
         // Jail root itself is allowed
-        let resolved_root = resolve_in_jail(&jail_root, &jail_root);
+        let resolved_root = resolve_in_jail(&canonical_root, &jail_root);
         assert!(resolved_root.is_some());
 
         // Path traversal escaping root is blocked
         let escape_path = jail_root.join("../");
-        let resolved_escape = resolve_in_jail(&jail_root, &escape_path);
+        let resolved_escape = resolve_in_jail(&canonical_root, &escape_path);
         assert!(resolved_escape.is_none());
 
         // Cleanup

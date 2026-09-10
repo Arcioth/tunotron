@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
@@ -87,6 +88,7 @@ pub struct AppState {
     pub shuffle_history: Vec<usize>,
     pub rng: XorShift64,
     pub playback: PlaybackState,
+    pub metadata_cache: HashMap<PathBuf, crate::event::MetadataPatch>,
     pub cmd_tx: mpsc::Sender<MpvCommand>,
     pub event_tx: mpsc::Sender<crate::event::AppEvent>,
     pub show_help: bool,
@@ -106,7 +108,7 @@ impl AppState {
         let mut state = Self {
             is_running: true,
             music_root: canonical_root.clone(),
-            current_dir: canonical_root,
+            current_dir: canonical_root.clone(),
             browser_items: Vec::new(),
             table_state: TableState::default(),
             active_playlist: Vec::new(),
@@ -116,6 +118,7 @@ impl AppState {
             shuffle_history: Vec::new(),
             rng: XorShift64::from_entropy(),
             playback: PlaybackState::default(),
+            metadata_cache: HashMap::new(),
             cmd_tx,
             event_tx,
             show_help: false,
@@ -125,10 +128,8 @@ impl AppState {
             progress_rect: Rect::default(),
         };
 
-        state.reload_current_directory();
-        if !state.browser_items.is_empty() {
-            state.table_state.select(Some(0));
-        }
+        let initial_items = read_directory(&canonical_root, &canonical_root);
+        state.set_browser_items(initial_items);
 
         state
     }
@@ -137,9 +138,48 @@ impl AppState {
         self.playback.is_playing
     }
 
+    /// Non-blocking folder reload: reads directory in background thread pool to prevent UI stutters
     pub fn reload_current_directory(&mut self) {
-        let items = read_directory(&self.current_dir, &self.music_root);
+        let dir = self.current_dir.clone();
+        let root = self.music_root.clone();
+        let event_tx = self.event_tx.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let items = read_directory(&dir, &root);
+            let _ = event_tx.blocking_send(crate::event::AppEvent::DirectoryLoaded { dir, items });
+        });
+    }
+
+    /// Sets new browser items, applying cached metadata immediately and only scanning uncached tracks
+    pub fn set_browser_items(&mut self, mut items: Vec<BrowserEntry>) {
         let old_selected = self.table_state.selected().unwrap_or(0);
+        let mut missing_paths = Vec::new();
+
+        // 1. Immediately apply cached metadata to tracks
+        for entry in &mut items {
+            if let BrowserEntry::AudioTrack(track) = entry {
+                if let Some(patch) = self.metadata_cache.get(&track.path) {
+                    if let Some(title) = &patch.title {
+                        track.title = title.clone();
+                    }
+                    if let Some(artist) = &patch.artist {
+                        track.artist = artist.clone();
+                    }
+                    if let Some(album) = &patch.album {
+                        track.album = album.clone();
+                    }
+                    if patch.duration_sec > 0.0 {
+                        track.set_duration(patch.duration_sec);
+                    }
+                    if patch.track_number.is_some() {
+                        track.track_number = patch.track_number;
+                    }
+                } else {
+                    missing_paths.push(track.path.clone());
+                }
+            }
+        }
+
         self.browser_items = items;
 
         if self.browser_items.is_empty() {
@@ -149,21 +189,17 @@ impl AppState {
             self.table_state.select(Some(next_idx));
         }
 
-        // Spawn non-blocking background metadata scan for audio tracks in this folder
-        let audio_paths: Vec<PathBuf> = self
-            .browser_items
-            .iter()
-            .filter_map(|e| match e {
-                BrowserEntry::AudioTrack(t) => Some(t.path.clone()),
-                _ => None,
-            })
-            .collect();
-
-        crate::library::Scanner::scan_paths_in_background(audio_paths, self.event_tx.clone());
+        // 2. Only spawn background probe for paths that are NOT in the cache
+        if !missing_paths.is_empty() {
+            crate::library::Scanner::scan_paths_in_background(missing_paths, self.event_tx.clone());
+        }
     }
 
     pub fn apply_metadata_patches(&mut self, patches: Vec<crate::event::MetadataPatch>) {
         for patch in patches {
+            // Save in session cache to eliminate re-reads upon revisiting
+            self.metadata_cache.insert(patch.path.clone(), patch.clone());
+
             for item in &mut self.browser_items {
                 if let BrowserEntry::AudioTrack(t) = item {
                     if t.path == patch.path {
@@ -444,7 +480,7 @@ impl AppState {
                 }
 
                 // Locate and highlight the track row
-                if let Some(pos) = self.browser_items.iter().position(|e| e.path() == &track_path) {
+                if let Some(pos) = self.browser_items.iter().position(|e| e.path() == track_path) {
                     self.table_state.select(Some(pos));
                 }
             }
@@ -629,40 +665,37 @@ impl AppState {
     /// and `true` for discrete state changes that warrant immediate screen redraw.
     pub fn handle_mpv_event(&mut self, event: MpvEvent) -> bool {
         match event {
-            MpvEvent::PropertyChange { name, data, .. } => {
-                if let Some(val) = data {
-                    match name.as_str() {
-                        "time-pos" => {
-                            if let Some(num) = val.as_f64() {
-                                self.playback.current_time_sec = num;
-                            }
-                            false
+            MpvEvent::PropertyChange { name, data: Some(val), .. } => {
+                match name.as_str() {
+                    "time-pos" => {
+                        if let Some(num) = val.as_f64() {
+                            self.playback.current_time_sec = num;
                         }
-                        "duration" => {
-                            if let Some(num) = val.as_f64() {
-                                self.playback.duration_sec = num;
-                            }
-                            true
-                        }
-                        "pause" => {
-                            if let Some(paused) = val.as_bool() {
-                                self.playback.is_paused = paused;
-                                self.playback.is_playing = !paused;
-                            }
-                            true
-                        }
-                        "volume" => {
-                            if let Some(v) = val.as_f64() {
-                                self.playback.volume = v;
-                            }
-                            true
-                        }
-                        _ => false,
+                        false
                     }
-                } else {
-                    false
+                    "duration" => {
+                        if let Some(num) = val.as_f64() {
+                            self.playback.duration_sec = num;
+                        }
+                        true
+                    }
+                    "pause" => {
+                        if let Some(paused) = val.as_bool() {
+                            self.playback.is_paused = paused;
+                            self.playback.is_playing = !paused;
+                        }
+                        true
+                    }
+                    "volume" => {
+                        if let Some(v) = val.as_f64() {
+                            self.playback.volume = v;
+                        }
+                        true
+                    }
+                    _ => false,
                 }
             }
+            MpvEvent::PropertyChange { .. } => false,
             MpvEvent::FileLoaded => {
                 self.playback.is_playing = true;
                 self.playback.is_paused = false;
@@ -803,6 +836,44 @@ mod tests {
         } else {
             panic!("Expected AudioTrack");
         }
+    }
+
+    #[test]
+    fn test_metadata_cache_instant_load() {
+        let (cmd_tx, _cmd_rx) = mpsc::channel(16);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let tmp = std::env::temp_dir();
+        let mut app = AppState::new(tmp.clone(), cmd_tx, event_tx);
+
+        let p1 = tmp.join("cached_song.mp3");
+
+        // Pre-populate metadata cache
+        app.metadata_cache.insert(
+            p1.clone(),
+            crate::event::MetadataPatch {
+                path: p1.clone(),
+                title: Some("Cached Title".to_string()),
+                artist: Some("Cached Artist".to_string()),
+                album: Some("Cached Album".to_string()),
+                duration_sec: 120.0,
+                track_number: Some(1),
+            },
+        );
+
+        // Setting browser items with a known cached track populates it synchronously
+        let fresh_track = Track::new(1, p1.clone());
+        app.set_browser_items(vec![BrowserEntry::AudioTrack(fresh_track)]);
+
+        if let BrowserEntry::AudioTrack(t) = &app.browser_items[0] {
+            assert_eq!(t.title, "Cached Title");
+            assert_eq!(t.artist, "Cached Artist");
+            assert_eq!(t.duration_label, "02:00");
+        } else {
+            panic!("Expected AudioTrack");
+        }
+
+        // Verify that NO background scanner events were triggered since all tracks were cached
+        assert!(event_rx.try_recv().is_err());
     }
 }
 

@@ -109,13 +109,11 @@ async fn main() -> Result<()> {
             // Branch 1: Terminal Stdin & Mouse Input
             maybe_evt = reader.next() => {
                 match maybe_evt {
-                    Some(Ok(CrosstermEvent::Key(key))) => {
-                        if key.kind == KeyEventKind::Press {
-                            let chord = KeyChord::from(key);
-                            if let Some(action) = key_state_machine.feed(chord, &keymap) {
-                                app.handle_action(action);
-                                should_render = true;
-                            }
+                    Some(Ok(CrosstermEvent::Key(key))) if key.kind == KeyEventKind::Press => {
+                        let chord = KeyChord::from(key);
+                        if let Some(action) = key_state_machine.feed(chord, &keymap) {
+                            app.handle_action(action);
+                            should_render = true;
                         }
                     }
                     Some(Ok(CrosstermEvent::Mouse(mouse))) => {
@@ -161,12 +159,20 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Branch 2: Domain Events (mpv IPC events, background scanner events)
+            // Branch 2: Domain Events (mpv IPC events, background scanner events, async directory loading)
             Some(domain_event) = event_rx.recv() => {
                 match domain_event {
                     AppEvent::Mpv(mpv_ev) => {
                         let dirty = app.handle_mpv_event(mpv_ev);
                         should_render |= dirty;
+                    }
+                    AppEvent::TimePos(sec) => {
+                        app.playback.current_time_sec = sec;
+                        should_render = true;
+                    }
+                    AppEvent::DirectoryLoaded { dir, items } if dir == app.current_dir => {
+                        app.set_browser_items(items);
+                        should_render = true;
                     }
                     AppEvent::Scanner(event::ScannerEvent::Batch(patches)) => {
                         app.apply_metadata_patches(patches);
@@ -182,6 +188,14 @@ async fn main() -> Result<()> {
                             let dirty = app.handle_mpv_event(mpv_ev);
                             should_render |= dirty;
                         }
+                        AppEvent::TimePos(sec) => {
+                            app.playback.current_time_sec = sec;
+                            should_render = true;
+                        }
+                        AppEvent::DirectoryLoaded { dir, items } if dir == app.current_dir => {
+                            app.set_browser_items(items);
+                            should_render = true;
+                        }
                         AppEvent::Scanner(event::ScannerEvent::Batch(patches)) => {
                             app.apply_metadata_patches(patches);
                             should_render = true;
@@ -192,8 +206,9 @@ async fn main() -> Result<()> {
             }
 
             // Branch 3: Guarded Seekbar Timer (Deactivated when paused or stopped -> 0.0% CPU)
+            // Polls time-pos at 4Hz, eliminating unprompted 50Hz IPC floods from mpv
             _ = ticker.tick(), if app.is_playing() => {
-                should_render = true;
+                let _ = app.cmd_tx.try_send(MpvCommand::GetTimePos);
             }
         }
     }

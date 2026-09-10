@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.1] - 2026-09-10 — Systems Refinement & IPC Optimization
+
+Following a targeted code review, this release eliminates IPC message serialization churn, introduces an in-memory metadata cache, and moves directory loading entirely off the main event loop.
+
+### ⚡ Performance & IPC Efficiency
+- **Polled `time-pos` (IPC Churn Elimination):** Removed `observe_property time-pos`. Instead of mpv continually broadcasting 40–50 unprompted JSON messages per second over the socket, Tunotron polls `get_property time-pos` on the 250ms tick timer (4 Hz) during active playback. This eliminates over 90% of UNIX socket traffic and string allocation in the mpv actor.
+- **In-Memory Metadata Cache:** Added `metadata_cache: HashMap<PathBuf, MetadataPatch>` on `AppState`. Revisiting previously scanned folders now populates tags instantaneously with **zero disk reads and zero background probes**.
+- **Asynchronous Directory Reading:** Directory loading now runs in `tokio::task::spawn_blocking` and dispatches `AppEvent::DirectoryLoaded`, preventing any UI stutters on slow mechanical drives or remote network shares.
+- **Eliminated Redundant Syscalls in `resolve_in_jail`:** Replaced redundant `canonicalize()` calls on `music_root` inside directory loops with a pre-canonicalized root path comparison.
+- **Display-Order Track IDs:** `Track::id` is assigned sequentially (1, 2, 3, ...) after directory sorting, strictly matching on-screen display order.
+
+### 🧪 Automated Testing
+- Added `test_metadata_cache_instant_load` verifying instant cache hits and zero background event emission on cached folders (bringing test suite to 10 passed tests).
+
+---
+
 ## [0.2.0] - 2026-09-10 — Core Optimization & Security Hardening
 
 Following a comprehensive systems audit (documented in `GROK_REVIEW.md`), this release optimizes hot rendering paths, eliminates memory allocations, hardens the filesystem jail against symlink escapes, and refines mouse and playback ergonomics.

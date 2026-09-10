@@ -125,7 +125,7 @@ fn render_browser_table(frame: &mut Frame, area: Rect, state: &mut AppState, the
                     .style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
                 }
                 BrowserEntry::AudioTrack(track) => {
-                    let is_active_track = current_playing_path.map_or(false, |p| p == &track.path);
+                    let is_active_track = current_playing_path == Some(&track.path);
                     let (status_icon, track_style) = if is_active_track {
                         if state.playback.is_playing {
                             (" ▶ ", Style::default().fg(theme.gauge_fill).add_modifier(Modifier::BOLD))

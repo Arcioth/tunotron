@@ -59,6 +59,7 @@ pub enum MpvCommand {
     SetVolume(f64),
     Stop,
     Quit,
+    GetTimePos,
 }
 
 impl MpvCommand {
@@ -102,6 +103,10 @@ impl MpvCommand {
             },
             MpvCommand::Quit => MpvRequest {
                 command: vec!["quit".into()],
+                request_id: req_id,
+            },
+            MpvCommand::GetTimePos => MpvRequest {
+                command: vec!["get_property".into(), "time-pos".into()],
                 request_id: req_id,
             },
         }

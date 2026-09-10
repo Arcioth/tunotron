@@ -23,6 +23,11 @@ pub enum AppEvent {
     Key(KeyEvent),
     Resize(u16, u16),
     Mpv(MpvEvent),
+    TimePos(f64),
+    DirectoryLoaded {
+        dir: PathBuf,
+        items: Vec<crate::library::BrowserEntry>,
+    },
     Scanner(ScannerEvent),
     Tick,
 }

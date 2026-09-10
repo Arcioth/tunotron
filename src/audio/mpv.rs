@@ -123,9 +123,8 @@ pub async fn run_mpv_actor(
     let mut reader = FramedRead::new(read_half, LinesCodec::new_with_max_length(64 * 1024));
     let mut writer = FramedWrite::new(write_half, LinesCodec::new_with_max_length(64 * 1024));
 
-    // Register property observations
+    // Register property observations (discrete events only; time-pos is polled at 4Hz on ticker)
     let init_cmds = [
-        r#"{"command":["observe_property",1,"time-pos"]}"#,
         r#"{"command":["observe_property",2,"pause"]}"#,
         r#"{"command":["observe_property",3,"duration"]}"#,
         r#"{"command":["observe_property",5,"volume"]}"#,
@@ -143,8 +142,17 @@ pub async fn run_mpv_actor(
                 match maybe_line {
                     Some(Ok(line)) => {
                         if let Ok(incoming) = serde_json::from_str::<MpvIncoming>(&line) {
-                            if let MpvIncoming::Event(event) = incoming {
-                                let _ = event_tx.send(AppEvent::Mpv(event)).await;
+                            match incoming {
+                                MpvIncoming::Event(event) => {
+                                    let _ = event_tx.send(AppEvent::Mpv(event)).await;
+                                }
+                                MpvIncoming::Response(resp) => {
+                                    if resp.error == "success" {
+                                        if let Some(num) = resp.data.and_then(|v| v.as_f64()) {
+                                            let _ = event_tx.send(AppEvent::TimePos(num)).await;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
