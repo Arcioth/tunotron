@@ -41,7 +41,7 @@ pub fn render_help_modal(frame: &mut Frame, area: Rect, theme: &Theme) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.accent))
-        .title(" 🎵 Tunotron Controls & Shortcuts ");
+        .title(concat!(" 🎵 Tunotron Controls & Shortcuts (v", env!("CARGO_PKG_VERSION"), ") "));
 
     let help_text = vec![
         Line::from(vec![

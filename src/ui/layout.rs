@@ -40,7 +40,7 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.border))
-        .title(" 🎵 TUNOTRON ");
+        .title(concat!(" 🎵 TUNOTRON v", env!("CARGO_PKG_VERSION"), " "));
 
     let current_path_str = state.current_dir.to_string_lossy();
     let density_label = match state.density {

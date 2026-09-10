@@ -28,6 +28,19 @@ use ui::{render_app, Theme};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // 0. Quick CLI flags (--version, --help)
+    if let Some(arg) = std::env::args().nth(1) {
+        if arg == "--version" || arg == "-V" {
+            println!("tunotron {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        if arg == "--help" || arg == "-h" {
+            println!("Tunotron v{} - Minimal, zero-bloat TUI music player", env!("CARGO_PKG_VERSION"));
+            println!("Usage: tunotron [MUSIC_DIRECTORY]");
+            return Ok(());
+        }
+    }
+
     // 1. Setup file-based logging (Never write to stdout/stderr in a TUI app!)
     let log_dir = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -46,7 +59,7 @@ async fn main() -> Result<()> {
         .with_writer(non_blocking)
         .init();
 
-    info!("Starting Tunotron TUI Music Player");
+    info!("Starting Tunotron TUI Music Player v{}", env!("CARGO_PKG_VERSION"));
 
     // 2. Parse music directory argument or default to ~/Music or current directory
     let music_dir = std::env::args()

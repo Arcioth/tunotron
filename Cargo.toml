@@ -1,6 +1,6 @@
 [package]
 name = "tunotron"
-version = "0.1.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["Arcioth"]
 description = "A minimal, rock-solid, extensible terminal music player"
