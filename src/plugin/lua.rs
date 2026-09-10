@@ -393,23 +393,48 @@ impl Plugin for LuaPlugin {
 
     fn on_event(&mut self, event: &PluginEvent) -> Vec<Action> {
         let Ok(plugin_tbl) = self.plugin_table() else { return Vec::new(); };
-        let Ok(on_event_fn) = plugin_tbl.get::<mlua::Function>("on_event") else { return Vec::new(); };
 
-        let lua_event: Value = match self.lua.to_value(event) {
-            Ok(val) => val,
-            Err(e) => {
-                tracing::error!("Failed to serialize event for plugin '{}': {}", self.manifest.id, e);
-                return Vec::new();
-            }
-        };
+        let mut actions = Vec::new();
+        let mut tick_handled = false;
 
-        match on_event_fn.call::<Value>(lua_event) {
-            Ok(ret_val) => parse_actions_from_value(ret_val),
-            Err(e) => {
-                tracing::error!("Error in on_event for plugin '{}': {}", self.manifest.id, e);
-                Vec::new()
+        // 1. If this is a Tick event, check for dedicated `on_tick(position, duration)` hook
+        if let PluginEvent::Tick { position, duration } = event {
+            if let Ok(on_tick_fn) = plugin_tbl.get::<mlua::Function>("on_tick") {
+                tick_handled = true;
+                match on_tick_fn.call::<Value>((*position, *duration)) {
+                    Ok(ret_val) => {
+                        actions.extend(parse_actions_from_value(ret_val));
+                    }
+                    Err(e) => {
+                        tracing::error!("Error in on_tick for plugin '{}': {}", self.manifest.id, e);
+                    }
+                }
             }
         }
+
+        // 2. Call standard `on_event(event)` hook if defined (and not already handled by on_tick)
+        if !tick_handled {
+            if let Ok(on_event_fn) = plugin_tbl.get::<mlua::Function>("on_event") {
+                let lua_event: Value = match self.lua.to_value(event) {
+                    Ok(val) => val,
+                    Err(e) => {
+                        tracing::error!("Failed to serialize event for plugin '{}': {}", self.manifest.id, e);
+                        return actions;
+                    }
+                };
+
+                match on_event_fn.call::<Value>(lua_event) {
+                    Ok(ret_val) => {
+                        actions.extend(parse_actions_from_value(ret_val));
+                    }
+                    Err(e) => {
+                        tracing::error!("Error in on_event for plugin '{}': {}", self.manifest.id, e);
+                    }
+                }
+            }
+        }
+
+        actions
     }
 
     fn on_action(&mut self, name: &str, payload: &serde_json::Value) -> Vec<Action> {
@@ -746,5 +771,97 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_lua_plugin_on_tick_hook() {
+        let script = r#"
+            local p = {}
+            p.manifest = {
+                id = "org.tunotron.ticktest",
+                name = "Tick Test",
+                version = "0.1.0",
+                description = "Tests on_tick hook",
+                capabilities = {}
+            }
+            function p.on_tick(pos, dur)
+                if pos >= 10.0 and dur >= 100.0 then
+                    return { action = "Seek", seconds = 5 }
+                end
+                return {}
+            end
+            return p
+        "#;
+
+        let mut plugin = LuaPlugin::from_script(script, "tick_test.lua").unwrap();
+        let tick_ev = PluginEvent::Tick {
+            position: 12.5,
+            duration: 180.0,
+        };
+        let actions = plugin.on_event(&tick_ev);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0], Action::Seek(5));
+    }
+
+    #[test]
+    fn test_lua_plugin_on_event_tick_fallback() {
+        let script = r#"
+            local p = {}
+            p.manifest = {
+                id = "org.tunotron.tickfallback",
+                name = "Tick Fallback",
+                version = "0.1.0",
+                description = "Tests on_event handling of Tick",
+                capabilities = {}
+            }
+            function p.on_event(event)
+                if event.type == "Tick" and event.position > 50.0 then
+                    return { action = "TogglePause" }
+                end
+                return {}
+            end
+            return p
+        "#;
+
+        let mut plugin = LuaPlugin::from_script(script, "tick_fallback.lua").unwrap();
+        let tick_ev = PluginEvent::Tick {
+            position: 55.0,
+            duration: 200.0,
+        };
+        let actions = plugin.on_event(&tick_ev);
+        assert_eq!(actions, vec![Action::TogglePause]);
+    }
+
+    #[test]
+    fn test_sleep_timer_example_plugin() {
+        let plugin_path = Path::new("examples/plugins/sleep_timer.lua");
+        let mut plugin = LuaPlugin::from_file(plugin_path, None).unwrap();
+
+        // 1. Toggle timer on
+        let actions = plugin.on_action("toggle_timer", &serde_json::json!({}));
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            Action::ShowModal { title, .. } => assert_eq!(title, "Sleep Timer Activated"),
+            other => panic!("Expected Action::ShowModal, got {:?}", other),
+        }
+
+        // Set remaining_sec to 1 for quick expiration testing
+        plugin.plugin_table().unwrap().set("remaining_sec", 1).unwrap();
+
+        // 2. Tick fires and timer expires
+        let tick_ev = PluginEvent::Tick {
+            position: 100.0,
+            duration: 300.0,
+        };
+        let actions = plugin.on_event(&tick_ev);
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0], Action::TogglePause);
+        match &actions[1] {
+            Action::ShowModal { title, content } => {
+                assert_eq!(title, "Sleep Timer Expired");
+                assert!(content.contains("Playback has been paused"));
+            }
+            other => panic!("Expected Action::ShowModal, got {:?}", other),
+        }
     }
 }

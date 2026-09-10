@@ -241,12 +241,6 @@ async fn main() -> Result<()> {
                     AppEvent::TimePos(sec) => {
                         app.clock.sync(sec);
                         app.playback.current_time_sec = sec;
-                        let current_sec = sec.floor() as u64;
-                        if current_sec != app.last_rendered_sec {
-                            app.last_rendered_sec = current_sec;
-                            app.playback.update_time_label(sec);
-                            should_render = true;
-                        }
                     }
                     AppEvent::DirectoryLoaded { dir, items } if dir == app.current_dir => {
                         let effects = app.set_browser_items(items);
@@ -303,12 +297,6 @@ async fn main() -> Result<()> {
                         AppEvent::TimePos(sec) => {
                             app.clock.sync(sec);
                             app.playback.current_time_sec = sec;
-                            let current_sec = sec.floor() as u64;
-                            if current_sec != app.last_rendered_sec {
-                                app.last_rendered_sec = current_sec;
-                                app.playback.update_time_label(sec);
-                                should_render = true;
-                            }
                         }
                         AppEvent::DirectoryLoaded { dir, items } if dir == app.current_dir => {
                             let effects = app.set_browser_items(items);
@@ -331,13 +319,24 @@ async fn main() -> Result<()> {
             }
 
             // Branch 3: Guarded Display Cadence Ticker (Active only while playing -> 0.0% idle CPU)
-            // Checks monotonic PlaybackClock; triggers screen redraw ONLY when the displayed second changes (~1 Hz)
+            // Checks monotonic PlaybackClock; triggers screen redraw & plugin tick ONLY when displayed second changes (~1 Hz)
             _ = display_ticker.tick(), if app.is_playing() => {
-                let current_sec = app.clock.now().floor() as u64;
+                let pos = app.clock.now();
+                let current_sec = pos.floor() as u64;
                 if current_sec != app.last_rendered_sec {
                     app.last_rendered_sec = current_sec;
-                    app.playback.update_time_label(app.clock.now());
+                    app.playback.update_time_label(pos);
                     should_render = true;
+
+                    let tick_ev = plugin::PluginEvent::Tick {
+                        position: pos,
+                        duration: app.playback.duration_sec,
+                    };
+                    let envelopes = plugin_mgr.dispatch_event(&tick_ev);
+                    for env in envelopes {
+                        let effects = app.reduce(env.action, &mut geom);
+                        execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
+                    }
                 }
             }
 

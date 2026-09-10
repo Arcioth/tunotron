@@ -208,7 +208,7 @@ impl AppState {
             rng: XorShift64::from_entropy(),
             playback: PlaybackState::default(),
             clock: PlaybackClock::new(),
-            last_rendered_sec: 0,
+            last_rendered_sec: u64::MAX,
             browser_title: " Music Browser (0 items) ".to_string(),
             metadata_cache: LruCache::new(Self::METADATA_CACHE_CAP),
             density: ViewDensity::Comfortable,
@@ -835,6 +835,7 @@ impl AppState {
             MpvEvent::FileLoaded => {
                 self.playback.state = PlayState::Playing;
                 self.clock.set_playing(true);
+                self.last_rendered_sec = u64::MAX;
                 (true, Vec::new())
             }
             MpvEvent::EndFile { reason, .. } => {
@@ -851,6 +852,7 @@ impl AppState {
                 self.clock.set_playing(false);
                 self.playback.current_time_sec = 0.0;
                 self.playback.update_time_label(0.0);
+                self.last_rendered_sec = u64::MAX;
                 (true, Vec::new())
             }
             _ => (false, Vec::new()),

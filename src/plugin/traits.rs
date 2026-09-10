@@ -23,6 +23,10 @@ pub enum PluginEvent {
     TimePos {
         seconds: f64,
     },
+    Tick {
+        position: f64,
+        duration: f64,
+    },
 }
 
 pub trait Plugin: Send {
