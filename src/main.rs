@@ -382,16 +382,36 @@ fn execute_effects(
                 }
             }
             Effect::Notify { summary, body } => {
-                tokio::spawn(async move {
-                    let res = tokio::process::Command::new("notify-send")
-                        .arg("--app-name=Tunotron")
-                        .arg(&summary)
-                        .arg(&body)
-                        .spawn();
-                    if let Err(e) = res {
-                        tracing::warn!("Failed to dispatch desktop notification: {}", e);
-                    }
-                });
+                static LAST_NOTIFICATION_TIMESTAMP_MS: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let last = LAST_NOTIFICATION_TIMESTAMP_MS.load(std::sync::atomic::Ordering::Relaxed);
+
+                // Throttle notifications: minimum 1000ms cooldown between desktop alerts
+                if now_ms.saturating_sub(last) < 1000 {
+                    tracing::debug!("Throttled rapid desktop notification");
+                } else {
+                    LAST_NOTIFICATION_TIMESTAMP_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+
+                    // Bound payload lengths to prevent argument flooding
+                    let safe_summary: String = summary.chars().take(128).collect();
+                    let safe_body: String = body.chars().take(512).collect();
+
+                    tokio::spawn(async move {
+                        let res = tokio::process::Command::new("notify-send")
+                            .arg("--app-name=Tunotron")
+                            .arg(&safe_summary)
+                            .arg(&safe_body)
+                            .spawn();
+                        if let Err(e) = res {
+                            tracing::warn!("Failed to dispatch desktop notification: {}", e);
+                        }
+                    });
+                }
             }
         }
     }

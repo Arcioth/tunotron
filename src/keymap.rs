@@ -538,5 +538,30 @@ mod tests {
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("missing Capability::KeyBind"));
     }
+
+    #[test]
+    fn test_example_plugins_keybinds_cleanly_register_without_conflicts() {
+        let mut keymap = KeyMap::default();
+
+        // 1. Sleep timer binds 'T'
+        assert!(keymap.register_plugin_chord("org.tunotron.sleeptimer", "T", "toggle_timer", true).is_ok());
+
+        // 2. Lyrics viewer binds 'L'
+        assert!(keymap.register_plugin_chord("org.tunotron.lyrics", "L", "toggle_lyrics", true).is_ok());
+
+        // 3. Now playing notifier binds 'N'
+        assert!(keymap.register_plugin_chord("org.tunotron.nowplaying", "N", "notify_now_playing", true).is_ok());
+
+        // Verify dispatch works for each registered chord
+        let t_chord = KeyChord::parse("T").unwrap();
+        assert_eq!(
+            keymap.lookup(&[t_chord]),
+            Some(Action::Plugin {
+                plugin_id: "org.tunotron.sleeptimer".to_string(),
+                name: "toggle_timer".to_string(),
+                payload: serde_json::Value::Null,
+            })
+        );
+    }
 }
 

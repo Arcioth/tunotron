@@ -13,7 +13,7 @@ plugin.manifest = {
         "UiOverlay"
     },
     keybinds = {
-        ["Z"] = "toggle_timer"
+        ["T"] = "toggle_timer"
     }
 }
 
@@ -22,7 +22,7 @@ local DEFAULT_DURATION_SEC = 15 * 60
 plugin.remaining_sec = nil
 
 function plugin.on_load()
-    tunotron.log("Sleep Timer plugin loaded. Press 'Z' to start/cancel a 15-minute sleep timer.")
+    tunotron.log("Sleep Timer plugin loaded. Press 'T' to start/cancel a 15-minute sleep timer.")
 end
 
 function plugin.on_action(name, payload)

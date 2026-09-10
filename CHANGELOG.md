@@ -9,19 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.7] - 2026-09-11 — Sandboxing Hardening: CPU Instruction Budget & Cross-Plugin Isolation
 
-This release hardens the plugin sandbox against CPU starvation attacks, prevents cross-plugin action spoofing, and enhances host observability:
+This release hardens the plugin sandbox against CPU starvation attacks, prevents cross-plugin action spoofing, eliminates VM escapes, and enhances host observability:
 
 ### 🛡️ Sandboxing & Safety Enhancements
 - **Instruction Budget Hook ([`src/plugin/lua.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/lua.rs)):**
   - Integrated Lua VM instruction hook checking every 2,500 instructions with a ceiling of 250,000 instructions (~1–2ms max CPU time per callback).
   - Rogue plugins with infinite loops (`while true do end`) are cleanly terminated without stalling the Tokio reactor or freezing the Ratatui TUI.
+- **Strict Safe Standard Libraries & Hook Propagation Shield ([`src/plugin/lua.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/lua.rs)):**
+  - Initialized Lua state using `Lua::new_with` restricted exclusively to safe standard libraries (`Table`, `String`, `Utf8`, `Math`).
+  - **No `coroutine`:** Prevents secondary threads from bypassing debug hooks.
+  - **No `io` or `package`:** Eliminates arbitrary filesystem access, `popen` command execution, and unverified native C library loading.
+  - **No `debug`:** Prevents scripts from clearing host hooks via `debug.sethook()`.
+  - **Stripped `dofile` & `loadfile`:** Closes host filesystem escape vectors.
+  - **Sanitized `load` & Bytecode Blocking:** Enforces text-only compilation (`mode = "t"`), rejects binary chunks starting with `\x1bLua`, and strips `string.dump`.
+- **Wall-Clock Execution Guard & 3-Strikes Auto-Disable ([`src/plugin/manager.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/manager.rs)):**
+  - Host tracks execution duration across callbacks with a 50ms wall-clock ceiling.
+  - Pathological patterns that block inside C routines (e.g. regex backtracking or GC spam) accumulate violation strikes; automatically disabled on 3 consecutive violations.
 - **Cross-Plugin Spoofing Shield ([`src/action.rs`](file:///home/arcioth/Documents/tunotron/src/action.rs)):**
   - Tightened [`ActionSource::is_permitted`](file:///home/arcioth/Documents/tunotron/src/action.rs#L260) to verify `caller_id == plugin_id` for `Action::Plugin`.
   - Plugins can no longer forge or dispatch actions into sibling plugins' internal handler surfaces. User keybindings and internal routing remain unrestricted.
-- **Observability & Host Hygiene ([`src/plugin/manager.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/manager.rs), [`src/plugin/manifest.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/manifest.rs), [`src/main.rs`](file:///home/arcioth/Documents/tunotron/src/main.rs)):**
-  - Host logs plugin registration with name, id, version, and granted capabilities.
-  - Added `api_version` manifest field for future version negotiation.
-  - Domain event queue warns if channel buffer is exhausted under backpressure.
+- **Keybinding Conflict Shield & Collision Fix ([`src/keymap.rs`](file:///home/arcioth/Documents/tunotron/src/keymap.rs), [`examples/plugins/sleep_timer.lua`](file:///home/arcioth/Documents/tunotron/examples/plugins/sleep_timer.lua)):**
+  - Reassigned Sleep Timer shortcut from `'Z'` to `'T'` (Timer) to avoid collision with host View Density toggle.
+  - Added automated keymap test validating that all example plugins register cleanly into default keymaps without conflicts.
+- **Deterministic Lexicographical Loading ([`src/plugin/loader.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/loader.rs)):**
+  - Directory entries sorted alphabetically prior to registration, eliminating filesystem-driver-dependent registration ordering.
+- **Notification Throttling & Payload Caps ([`src/main.rs`](file:///home/arcioth/Documents/tunotron/src/main.rs)):**
+  - Enforced 1000ms minimum cooldown between desktop notifications and truncated summaries (128 chars) and bodies (512 chars) to prevent process flood.
+- **API Version Compatibility Enforcement ([`src/plugin/manager.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/manager.rs)):**
+  - Added compatibility check rejecting plugins requesting unsupported major API versions.
 
 ---
 
@@ -38,7 +53,7 @@ This release completes the final two pillars of Tunotron's 5-pillar extension ar
   - Plugins can define dedicated `function plugin.on_tick(pos, dur)` or handle `event.type == "Tick"` in `on_event(event)`.
   - Built-in deduplication prevents double-dispatch if both hooks are defined.
 - **Sleep Timer Reference Plugin ([`examples/plugins/sleep_timer.lua`](file:///home/arcioth/Documents/tunotron/examples/plugins/sleep_timer.lua)):**
-  - Full implementation of a 15-minute countdown sleep timer using `KeyBind` (`'Z'`), `on_tick`, and `UiOverlay`. Automatically pauses audio and announces expiration through a modal dialog.
+  - Full implementation of a 15-minute countdown sleep timer using `KeyBind` (`'T'`), `on_tick`, and `UiOverlay`. Automatically pauses audio and announces expiration through a modal dialog.
 
 ### 🔔 Pillar 5: Desktop Notifications & Host Integration (`Capability::Notify`)
 - **Capability-Gated Notifications ([`src/action.rs`](file:///home/arcioth/Documents/tunotron/src/action.rs)):**

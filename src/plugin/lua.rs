@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use mlua::{HookTriggers, Lua, LuaSerdeExt, Table, Value, VmState};
+use mlua::{HookTriggers, Lua, LuaOptions, LuaSerdeExt, StdLib, Table, Value, VmState};
 use crate::action::{Action, Capability};
 use super::manifest::PluginManifest;
 use super::traits::{Plugin, PluginEvent};
@@ -33,9 +33,18 @@ impl LuaPlugin {
         chunk_name: &str,
         music_root: Option<&Path>,
     ) -> Result<Self, String> {
-        let lua = Lua::new();
+        // 1. Sandbox setup: initialize with only safe standard libraries (table, string, utf8, math).
+        // Strips dangerous host process controls and modules by construction:
+        // - No `coroutine`: prevents secondary threads from escaping the instruction budget hook.
+        // - No `io`: prevents arbitrary filesystem read/write and process spawning.
+        // - No `debug`: prevents scripts from introspecting or wiping hooks via debug.sethook().
+        // - No `package`: prevents loading external unverified C or Lua libraries.
+        let lua = Lua::new_with(
+            StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH,
+            LuaOptions::default(),
+        )
+        .map_err(|e| format!("Failed to initialize sandboxed Lua VM: {}", e))?;
 
-        // 1. Sandbox setup: strip dangerous host process controls and cap memory (16MB)
         let _ = lua.set_memory_limit(16 * 1024 * 1024);
         setup_sandbox(&lua)?;
 
@@ -127,24 +136,69 @@ impl LuaPlugin {
 fn setup_sandbox(lua: &Lua) -> Result<(), String> {
     let globals = lua.globals();
 
-    // Restrict `os` module: keep only safe math/time functions
-    if let Ok(orig_os) = globals.get::<Table>("os") {
-        let safe_os = lua.create_table().map_err(|e| e.to_string())?;
-        if let Ok(clock) = orig_os.get::<mlua::Function>("clock") {
-            let _ = safe_os.set("clock", clock);
-        }
-        if let Ok(time) = orig_os.get::<mlua::Function>("time") {
-            let _ = safe_os.set("time", time);
-        }
-        if let Ok(difftime) = orig_os.get::<mlua::Function>("difftime") {
-            let _ = safe_os.set("difftime", difftime);
-        }
-        let _ = globals.set("os", safe_os);
+    // 1. Safe `os` module: expose only pure time/clock functions, no environment or process access
+    let safe_os = lua.create_table().map_err(|e| e.to_string())?;
+    let clock_fn = lua
+        .create_function(|_, ()| {
+            Ok(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64())
+        })
+        .map_err(|e| e.to_string())?;
+    let time_fn = lua
+        .create_function(|_, ()| {
+            Ok(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs())
+        })
+        .map_err(|e| e.to_string())?;
+    let difftime_fn = lua
+        .create_function(|_, (t2, t1): (f64, f64)| Ok(t2 - t1))
+        .map_err(|e| e.to_string())?;
+
+    let _ = safe_os.set("clock", clock_fn);
+    let _ = safe_os.set("time", time_fn);
+    let _ = safe_os.set("difftime", difftime_fn);
+    let _ = globals.set("os", safe_os);
+
+    // 2. Strip dangerous file loading globals that bypass the filesystem jail
+    let _ = globals.set("dofile", Value::Nil);
+    let _ = globals.set("loadfile", Value::Nil);
+
+    // 3. Strip string.dump to prevent bytecode emission
+    if let Ok(str_tbl) = globals.get::<Table>("string") {
+        let _ = str_tbl.set("dump", Value::Nil);
     }
 
-    // Disable package.loadlib to prevent loading unsafe external native C libraries
-    if let Ok(pkg) = globals.get::<Table>("package") {
-        let _ = pkg.set("loadlib", Value::Nil);
+    // 4. Wrap `load` to strictly enforce text mode ("t") and reject binary bytecode chunks (0x1b header)
+    if let Ok(orig_load) = globals.get::<mlua::Function>("load") {
+        let safe_load = lua
+            .create_function(
+                move |_lua,
+                      (chunk, chunkname, _mode, env): (
+                    Value,
+                    Option<String>,
+                    Option<String>,
+                    Option<Value>,
+                )| {
+                    if let Value::String(ref s) = chunk {
+                        let bytes = s.as_bytes();
+                        if bytes.starts_with(b"\x1b") {
+                            return Ok((
+                                Value::Nil,
+                                Value::String(_lua.create_string("Binary bytecode execution is blocked in sandbox")?),
+                            ));
+                        }
+                    }
+                    // Force text-only mode "t"
+                    let res: (Value, Value) = orig_load.call((chunk, chunkname, "t", env))?;
+                    Ok(res)
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        let _ = globals.set("load", safe_load);
     }
 
     Ok(())
@@ -617,6 +671,59 @@ mod tests {
     }
 
     #[test]
+    fn test_lua_plugin_sandbox_blocks_dangerous_globals_and_coroutines() {
+        let script = r#"
+            local p = {}
+            p.manifest = { id = "com.test.globals_check" }
+            function p.on_action(name, payload)
+                -- All dangerous modules/globals must be completely nil
+                local violations = {}
+                if coroutine ~= nil then table.insert(violations, "coroutine") end
+                if io ~= nil then table.insert(violations, "io") end
+                if debug ~= nil then table.insert(violations, "debug") end
+                if package ~= nil then table.insert(violations, "package") end
+                if dofile ~= nil then table.insert(violations, "dofile") end
+                if loadfile ~= nil then table.insert(violations, "loadfile") end
+                if string.dump ~= nil then table.insert(violations, "string.dump") end
+                if os.getenv ~= nil then table.insert(violations, "os.getenv") end
+                if os.execute ~= nil then table.insert(violations, "os.execute") end
+
+                if #violations == 0 then
+                    return "ToggleHelp"
+                end
+                return nil
+            end
+            return p
+        "#;
+
+        let mut plugin = LuaPlugin::from_script(script, "globals_check.lua").unwrap();
+        let actions = plugin.on_action("check", &serde_json::json!({}));
+        assert_eq!(actions, vec![Action::ToggleHelp], "Dangerous globals must be nil");
+    }
+
+    #[test]
+    fn test_lua_plugin_sandbox_rejects_binary_bytecode() {
+        let script = r#"
+            local p = {}
+            p.manifest = { id = "com.test.bytecode" }
+            function p.on_action(name, payload)
+                -- Attempt to load a fake binary bytecode chunk starting with Lua signature \x1bLua
+                local fake_bytecode = "\27Lua\84\0\0\0\0\0\0\0"
+                local chunk, err = load(fake_bytecode)
+                if chunk == nil and string.find(err, "Binary bytecode") then
+                    return "ToggleHelp"
+                end
+                return nil
+            end
+            return p
+        "#;
+
+        let mut plugin = LuaPlugin::from_script(script, "bytecode.lua").unwrap();
+        let actions = plugin.on_action("check", &serde_json::json!({}));
+        assert_eq!(actions, vec![Action::ToggleHelp], "Bytecode chunk must be rejected");
+    }
+
+    #[test]
     fn test_lua_plugin_custom_action_dispatch() {
         let script = r#"
             local p = {}
@@ -1061,4 +1168,5 @@ mod tests {
         assert!(elapsed < std::time::Duration::from_millis(50));
         assert!(actions.is_empty(), "Aborted script must return no actions");
     }
+
 }

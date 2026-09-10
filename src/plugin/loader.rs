@@ -23,8 +23,10 @@ pub fn load_plugins_from_dir(dir: &Path, music_root: Option<&Path>, mgr: &mut Pl
 
     let mut loaded_count = 0;
 
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    paths.sort();
+
+    for path in paths {
 
         let plugin_file = if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("lua") {
             Some(path)
