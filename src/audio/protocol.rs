@@ -50,7 +50,7 @@ pub enum MpvEvent {
     Unknown,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MpvCommand {
     LoadFile { path: String, replace: bool },
     TogglePause,

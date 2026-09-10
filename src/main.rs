@@ -18,7 +18,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use action::Action;
+use action::{Action, Effect};
 use app::AppState;
 use audio::{run_mpv_actor, MpvCommand, MpvSupervisor};
 use event::AppEvent;
@@ -97,7 +97,8 @@ async fn main() -> Result<()> {
     let terminal = harness.terminal_mut();
 
     // 6. Initialize Application State, UI Geometry & Keymap
-    let mut app = AppState::new(music_dir, cmd_tx, event_tx.clone());
+    let (mut app, init_effects) = AppState::new(music_dir);
+    execute_effects(init_effects, &cmd_tx, &event_tx);
     let mut geom = UiGeom::new();
     geom.clamp_selection(app.browser_items.len());
 
@@ -131,18 +132,21 @@ async fn main() -> Result<()> {
                     Some(Ok(CrosstermEvent::Key(key))) if key.kind == KeyEventKind::Press => {
                         let chord = KeyChord::from(key);
                         if let Some(action) = key_state_machine.feed(chord, &keymap) {
-                            app.handle_action(action, &mut geom);
+                            let effects = app.reduce(action, &mut geom);
+                            execute_effects(effects, &cmd_tx, &event_tx);
                             should_render = true;
                         }
                     }
                     Some(Ok(CrosstermEvent::Mouse(mouse))) => {
                         match mouse.kind {
                             MouseEventKind::ScrollDown => {
-                                app.handle_action(Action::MoveDown(2), &mut geom);
+                                let effects = app.reduce(Action::MoveDown(2), &mut geom);
+                                execute_effects(effects, &cmd_tx, &event_tx);
                                 should_render = true;
                             }
                             MouseEventKind::ScrollUp => {
-                                app.handle_action(Action::MoveUp(2), &mut geom);
+                                let effects = app.reduce(Action::MoveUp(2), &mut geom);
+                                execute_effects(effects, &cmd_tx, &event_tx);
                                 should_render = true;
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
@@ -160,12 +164,14 @@ async fn main() -> Result<()> {
                                     let relative_x = mouse.column.saturating_sub(geom.progress_rect.x) as f64;
                                     let denom = geom.progress_rect.width.max(1).saturating_sub(1).max(1) as f64;
                                     let ratio = (relative_x / denom).clamp(0.0, 1.0);
-                                    app.handle_action(Action::SeekRatio(ratio), &mut geom);
+                                    let effects = app.reduce(Action::SeekRatio(ratio), &mut geom);
+                                    execute_effects(effects, &cmd_tx, &event_tx);
                                     should_render = true;
                                 } else if geom.browser_rows_rect.contains(pos) {
                                     let visual = (mouse.row.saturating_sub(geom.browser_rows_rect.y)) as usize;
                                     let idx = geom.scroll_offset() + visual;
-                                    app.handle_action(Action::SelectIndex(idx), &mut geom);
+                                    let effects = app.reduce(Action::SelectIndex(idx), &mut geom);
+                                    execute_effects(effects, &cmd_tx, &event_tx);
                                     should_render = true;
                                 }
                             }
@@ -187,7 +193,8 @@ async fn main() -> Result<()> {
             Some(domain_event) = event_rx.recv() => {
                 match domain_event {
                     AppEvent::Mpv(mpv_ev) => {
-                        let dirty = app.handle_mpv_event(mpv_ev);
+                        let (dirty, effects) = app.handle_mpv_event(mpv_ev);
+                        execute_effects(effects, &cmd_tx, &event_tx);
                         should_render |= dirty;
                     }
                     AppEvent::TimePos(sec) => {
@@ -201,7 +208,8 @@ async fn main() -> Result<()> {
                         }
                     }
                     AppEvent::DirectoryLoaded { dir, items } if dir == app.current_dir => {
-                        app.set_browser_items(items);
+                        let effects = app.set_browser_items(items);
+                        execute_effects(effects, &cmd_tx, &event_tx);
                         geom.clamp_selection(app.browser_items.len());
                         should_render = true;
                     }
@@ -216,7 +224,8 @@ async fn main() -> Result<()> {
                 while let Ok(pending) = event_rx.try_recv() {
                     match pending {
                         AppEvent::Mpv(mpv_ev) => {
-                            let dirty = app.handle_mpv_event(mpv_ev);
+                            let (dirty, effects) = app.handle_mpv_event(mpv_ev);
+                            execute_effects(effects, &cmd_tx, &event_tx);
                             should_render |= dirty;
                         }
                         AppEvent::TimePos(sec) => {
@@ -230,7 +239,8 @@ async fn main() -> Result<()> {
                             }
                         }
                         AppEvent::DirectoryLoaded { dir, items } if dir == app.current_dir => {
-                            app.set_browser_items(items);
+                            let effects = app.set_browser_items(items);
+                            execute_effects(effects, &cmd_tx, &event_tx);
                             geom.clamp_selection(app.browser_items.len());
                             should_render = true;
                         }
@@ -256,14 +266,41 @@ async fn main() -> Result<()> {
 
             // Branch 4: Periodic mpv Drift Calibration Ticker (Every 5 seconds -> 0.2 Hz IPC)
             _ = resync_ticker.tick(), if app.is_playing() => {
-                let _ = app.cmd_tx.try_send(MpvCommand::GetTimePos);
+                let _ = cmd_tx.try_send(MpvCommand::GetTimePos);
             }
         }
     }
 
-    let _ = app.cmd_tx.try_send(MpvCommand::Quit);
+    let _ = cmd_tx.try_send(MpvCommand::Quit);
     info!("Tunotron exiting gracefully");
     Ok(())
+}
+
+fn execute_effects(
+    effects: Vec<Effect>,
+    cmd_tx: &mpsc::Sender<MpvCommand>,
+    event_tx: &mpsc::Sender<AppEvent>,
+) {
+    for effect in effects {
+        match effect {
+            Effect::Mpv(cmd) => {
+                let _ = cmd_tx.try_send(cmd);
+            }
+            Effect::LoadDirectory { dir, root } => {
+                let tx = event_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let items = library::read_directory(&dir, &root);
+                    let _ = tx.blocking_send(AppEvent::DirectoryLoaded { dir, items });
+                });
+            }
+            Effect::ScanMetadata(paths) => {
+                library::Scanner::scan_paths_in_background(paths, event_tx.clone());
+            }
+            Effect::PluginAction { plugin_id, name, payload } => {
+                tracing::debug!("Dispatching plugin action: [{}] {} {:?}", plugin_id, name, payload);
+            }
+        }
+    }
 }
 
 fn dirs_home() -> PathBuf {

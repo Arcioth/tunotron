@@ -1,6 +1,20 @@
 #![allow(dead_code)]
 
+use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use crate::audio::MpvCommand;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Effect {
+    Mpv(MpvCommand),
+    LoadDirectory { dir: PathBuf, root: PathBuf },
+    ScanMetadata(Vec<PathBuf>),
+    PluginAction {
+        plugin_id: String,
+        name: String,
+        payload: serde_json::Value,
+    },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LoopMode {

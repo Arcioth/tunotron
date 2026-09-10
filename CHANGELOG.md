@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.2] - 2026-09-10 — Pure Reducer, Isolated State & Explicit Typed Effects
+
+Following user architectural directives, this release eliminates side-effects and cross-thread channel handles from `AppState`, completing the pure reducer pattern (`reduce(&mut self, action: Action, geom: &mut UiGeom) -> Vec<Effect>`) and preparing a bulletproof boundary for plugin integrations.
+
+### 🧱 Pure Reducer & Effect Decoupling
+- **Zero Channel Dependencies in `AppState`:** Stripped `cmd_tx` and `event_tx` channels from `AppState`. The state struct is now a 100% pure in-memory model containing zero channels, zero sockets, zero threads, and zero async runtimes.
+- **Pure State Transitions:** Replaced `handle_action` with `pub fn reduce(&mut self, action: Action, geom: &mut UiGeom) -> Vec<Effect>`. All state modifications are completely deterministic and synchronous.
+- **Typed `Effect` Enum:** All side-effects are cleanly emitted as typed values:
+  - `Effect::Mpv(MpvCommand)`: Controls playback, volume, seeks, and daemon termination.
+  - `Effect::LoadDirectory { dir, root }`: Triggers non-blocking directory reads in the background threadpool.
+  - `Effect::ScanMetadata(Vec<PathBuf>)`: Dispatches background metadata extraction for uncached tracks.
+  - `Effect::PluginAction { plugin_id, name, payload }`: Extension hook for plugin invocations.
+- **Central Effect Runner:** Added `execute_effects` in `main.rs` to process emitted effects and route them to their respective actors and workers.
+- **Channel-Free Unit Testing:** Unit tests for `AppState` no longer need to construct Tokio async channels; testing state transitions is now instantaneous and completely deterministic.
+
+### 🧪 Automated Testing & Binary Footprint
+- 17 passed unit tests, 0 warnings (0.03s execution time).
+- Tested reducer effects via `test_pure_reducer_effects`.
+- Release binary footprint preserved at **3.1 MB** with Fat LTO and symbol stripping.
+
+---
+
 ## [0.3.1] - 2026-09-10 — Phase 2.5 Pre-Plugin Architecture & Pure Projection Rendering
 
 Following an architectural review, this release implements Phase 2.5 architectural guardrails, establishing pure projection rendering, typed window compositing, and sandboxed action capability boundaries in preparation for the Lua 5.4 (`mlua`) plugin engine.
