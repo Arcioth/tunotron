@@ -101,6 +101,15 @@ async fn main() -> Result<()> {
     let mut plugin_mgr = plugin::PluginManager::new();
     let _ = plugin_mgr.register(Box::new(plugin::TrackLoggerPlugin::new()));
 
+    let plugin_dir = plugin::default_plugin_dir();
+    let user_plugins_loaded = plugin::load_plugins_from_dir(&plugin_dir, &mut plugin_mgr);
+    info!(
+        "Plugins initialized: {} built-in, {} external from {}",
+        plugin_mgr.len().saturating_sub(user_plugins_loaded),
+        user_plugins_loaded,
+        plugin_dir.display()
+    );
+
     let (mut app, init_effects) = AppState::new(music_dir);
     execute_effects(init_effects, &cmd_tx, &event_tx, &mut plugin_mgr);
     let mut geom = UiGeom::new();

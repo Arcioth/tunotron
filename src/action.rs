@@ -141,6 +141,35 @@ pub enum Capability {
     KeyBind,
 }
 
+impl std::str::FromStr for Capability {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "PlaybackControl" => Ok(Capability::PlaybackControl),
+            "PlaybackQueue" => Ok(Capability::PlaybackQueue),
+            "UiOverlay" => Ok(Capability::UiOverlay),
+            "FsJailRead" => Ok(Capability::FsJailRead),
+            "FsJailWrite" => Ok(Capability::FsJailWrite),
+            "KeyBind" => Ok(Capability::KeyBind),
+            other => Err(format!("Unknown capability: {}", other)),
+        }
+    }
+}
+
+impl Capability {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Capability::PlaybackControl => "PlaybackControl",
+            Capability::PlaybackQueue => "PlaybackQueue",
+            Capability::UiOverlay => "UiOverlay",
+            Capability::FsJailRead => "FsJailRead",
+            Capability::FsJailWrite => "FsJailWrite",
+            Capability::KeyBind => "KeyBind",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ActionPermission {
     Public,

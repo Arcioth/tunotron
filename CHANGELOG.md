@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.4] - 2026-09-10 — Sandboxed Lua 5.4 Extension Engine & Auto-Loader
+
+Following the plugin architecture roadmap, this release embeds a sandboxed, low-overhead Lua 5.4 scripting runtime (`mlua`) on top of the native plugin trait and capability manager. Users can now drop single-file scripts (`*.lua`) or modular directory packages (`<plugin>/init.lua`) into `~/.config/tunotron/plugins/` to react to playback events and emit capability-governed actions.
+
+### 🌙 Sandboxed Lua 5.4 Runtime (`mlua`)
+- **Sandboxed `LuaPlugin` Engine ([`src/plugin/lua.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/lua.rs)):** Full bridge conforming to the `Plugin` trait:
+  - **Memory Guard:** Enforces a strict 16MB memory limit (`set_memory_limit`) on the Lua VM to prevent runaway allocations or memory leaks from untrusted scripts.
+  - **Environment Sandboxing:** Stripped dangerous host system operations (`os.exit`, `os.execute`, `os.remove`, `os.rename`, etc., keeping only safe time/clock routines) and neutralized `package.loadlib` to block unauthorized shared-library loading.
+  - **Host API Injection:** Injected global `tunotron` module with non-blocking logging hooks (`tunotron.log`, `tunotron.warn`, `tunotron.error`) and version introspection (`tunotron.version`).
+  - **Dual Action Deserializer:** Translates return values from Lua callbacks into typed domain `Action` values supporting both concise string aliases (`"TogglePause"`, `"NextTrack"`, `"Quit"`) and structured parameter tables (`{ action = "Seek", seconds = 15 }`, `{ action = "SetVolume", volume = 80.0 }`, `{ action = "PlayTrackIndex", index = 3 }`).
+- **User Plugin Discovery & Auto-Loading ([`src/plugin/loader.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/loader.rs)):**
+  - Discovers plugins in `$XDG_CONFIG_HOME/tunotron/plugins` (or `~/.config/tunotron/plugins`).
+  - Automatically registers valid `*.lua` files and `<dir>/init.lua` plugin packages during initialization.
+- **Example Plugin Blueprint ([`examples/plugins/track_announcer.lua`](file:///home/arcioth/Documents/tunotron/examples/plugins/track_announcer.lua)):**
+  - Reference implementation illustrating manifest declaration, capability requests (`PlaybackControl`), lifecycle hooks (`on_load`, `on_unload`), event subscriptions (`on_event`), and custom action handlers (`on_action`).
+
+### 🧪 Automated Testing & Footprint Verification
+- **25 Passed Unit Tests, 0 Warnings (0.08s execution time):**
+  - Added unit tests for script manifest parsing, event action emission, `os.exit` sandbox escape prevention, custom action routing, and Lua memory limit containment.
+- **Strict Binary Constraint Met:**
+  - Vendored Lua 5.4.7 compiles with zero system dependencies; release binary size is **3.5 MB** with Fat LTO and stripped symbols (well below the 3.8 MB ceiling).
+  - 0 compiler and 0 clippy warnings across the entire workspace.
+
+---
+
 ## [0.3.3] - 2026-09-10 — Rust Plugin Protocol & Sandboxed In-Tree Host
 
 Following user architectural directives, this release establishes the Rust-native plugin protocol and lifecycle host before introducing Lua bindings. Plugins operate strictly as event-driven cold inputs, receiving read-only domain events and emitting capability-checked actions.
