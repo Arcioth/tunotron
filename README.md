@@ -14,6 +14,11 @@ Built with **Rust**, **Ratatui**, and headless **mpv** over asynchronous UNIX so
 </div>
 
 ---
+<div align="center">
+Current nixos build stats ** 5.42s** for the full 172 steps
+</div>
+---
+
 
 ## ⚡ Core Philosophy
 
