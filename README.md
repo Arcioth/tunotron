@@ -5,10 +5,10 @@
 **A minimal, zero-bloat, rock-solid, extensible terminal music player.**  
 Built with **Rust**, **Ratatui**, and headless **mpv** over asynchronous UNIX sockets.
 
-[![Version](https://img.shields.io/badge/version-v0.3.7-blue?style=for-the-badge)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.3.8-blue?style=for-the-badge)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-success?style=for-the-badge)](LICENSE)
 [![Binary Size](https://img.shields.io/badge/binary%20size-4.0%20MB-purple?style=for-the-badge)](#-performance-benchmarks)
-[![Tests](https://img.shields.io/badge/tests-66%20passed%20%7C%200%20warnings-brightgreen?style=for-the-badge)](#-automated-test-suite)
+[![Tests](https://img.shields.io/badge/tests-70%20passed%20%7C%200%20warnings-brightgreen?style=for-the-badge)](#-automated-test-suite)
 [![Platform](https://img.shields.io/badge/platform-NixOS%20%7C%20Arch%20%7C%20Fedora%20%7C%20CachyOS-informational?style=for-the-badge)](#-quickstart--installation)
 
 </div>
@@ -29,9 +29,9 @@ Tunotron is engineered around the principle of **"Linear, zero-friction playback
 - **💤 0.0% Idle CPU & Ultra-Low IPC:** Tokio reactor sleeps inside `epoll_wait`. Monotonic `PlaybackClock` interpolation reduces mpv UNIX socket traffic to **0.2 Hz (once per 5s)** for drift calibration and **0.0 msgs/s** when paused or stopped.
 - **⚡ Throttled 1 Hz Steady-State Redraw:** Terminal UI redraws only when the displayed second integer advances (1 Hz) or on discrete user input, saving massive CPU for both Tunotron and your terminal emulator.
 - **🚀 Sub-Millisecond Folder Navigation & In-Memory Metadata Cache:** Directory reading is non-blocking on Tokio worker threads. Tag parsing is decoupled into background batches, and read metadata is cached in a bounded 10,000-track in-memory store for instant zero-I/O returns.
-- **🖱️ Native Mouse Integration:** Scroll directory lists with the mouse wheel, left-click rows to select songs, and click directly on the progress bar to seek.
+- **🖱️ Native Mouse Integration:** Scroll directory lists with the mouse wheel, left-click rows to select songs, double-click to play immediately, and click directly on the progress bar to seek.
 - **🎲 True Fisher-Yates Shuffle:** Powered by an internal `XorShift64` PRNG. Guarantees non-repeating full-deck playback and tracks play history for previous-track navigation.
-- **🪟 Floating Window Compositor:** Layered modal support (like the built-in `?` Help dialog) that properly shields mouse hitboxes and routes input chords.
+- **🪟 Floating Window Compositor & Dedicated Extension Viewports:** Layered modal support and full-screen multi-tab extension viewports with interactive form controls and dynamic 3D soundstage radar visualizers.
 
 ---
 
@@ -52,19 +52,19 @@ Following comprehensive systems audits across `v0.2.0` and `v0.3.0`, Tunotron el
 | **Resident Memory (RSS)** | ~25 MB – 29 MB | **~18 MB – 22 MB** | Flat & bounded (10k cache cap) |
 | **Folder Switch Latency (100+ files)** | 150ms – 1,200ms UI freeze (blocking lofty probe) | **< 1ms instantaneous switch** | **150× – 1,000× faster** |
 | **Revisited Folder Metadata Latency** | Full disk rescan / lofty probe | **0.00ms (instant in-memory cache hit)** | **Zero disk I/O** |
-| **Single Binary Size** | 4.5 MB | **4.0 MB** (Fat LTO + embedded Lua 5.4 + stripped symbols) | **~15% smaller** |
+| **Single Binary Size** | 4.5 MB | **4.1 MB** (Fat LTO + embedded Lua 5.4 + stripped symbols) | **~15% smaller** |
 
 ---
 
 ## 🧪 Automated Test Suite
 
-Tunotron includes 66 automated unit and integration tests covering security jails, PRNG determinism, playback loop modes, keychord normalization, clock interpolation, metadata caching, background metadata patching, modal window stacks, the 6-pillar Lua plugin system, and the Unix socket IPC controller:
+Tunotron includes 70 automated unit and integration tests covering security jails, PRNG determinism, playback loop modes, keychord normalization, clock interpolation, metadata caching, background metadata patching, modal window stacks, the 6-pillar Lua plugin system, dedicated tab viewports, and the Unix socket IPC controller:
 
 ```bash
 $ cargo test
-running 66 tests
+running 70 tests
 ...
-test result: ok. 66 passed; 0 failed; 0 ignored; finished in 0.17s
+test result: ok. 70 passed; 0 failed; 0 ignored; finished in 0.17s
 ```
 
 ---
@@ -131,11 +131,21 @@ $ tunotron status --json --follow
 ### View & Window Modals
 | Key | Action |
 | :--- | :--- |
+| `Tab` / `<BackTab>` | Switch active tab (`1: Browser` ↔ extension pages) |
+| `1` – `9` | Direct jump to tab index |
 | `Z` | Toggle View Density (`Comfortable` ↔ `Compact`) |
 | `r` | Reload directory from disk |
 | `?` | Open Help modal dialog |
-| `<Esc>` | Close top modal window |
+| `<Esc>` | Close top modal window or return to Library Browser |
 | `q` | Quit cleanly (restores terminal & cleans up mpv daemon) |
+
+### Extension Page Form Controls (when on an extension tab)
+| Key | Action |
+| :--- | :--- |
+| `↑` / `↓` | Select previous / next form field (slider, selector, toggle, button) |
+| `←` / `→` | Adjust slider value or step through option selector |
+| `<Enter>` / `<Space>` | Toggle checkbox or activate button |
+| `<Esc>` | Return to Library Browser tab |
 
 ---
 
@@ -181,16 +191,18 @@ Tunotron features a sandboxed, low-overhead **Lua 5.4** runtime (`mlua`) operati
 - **Sandboxed Environment:** Dangerous globals (`os.exit`, `os.execute`, `io`, `package.loadlib`, `debug`) are completely stripped.
 - **0.0% Idle CPU:** Heartbeat hooks (`on_tick`) fire only while audio is actively playing, leaving CPU usage at 0.0% when paused or stopped.
 
-### 🏛️ The 6 Core Extension Pillars
+### 🏛️ The 7 Core Extension Pillars
 1. **Custom Keybindings (`Capability::KeyBind`):** Plugins declare custom single keys, combos (`"ctrl+y"`), or sequences (`"g g"`) in their manifest. Critical host navigation keys (`q`, `Esc`, arrows, `Enter`) are shielded against hijacking.
 2. **Declarative Modals (`Capability::UiOverlay`):** Emit `{ action = "ShowModal", title = "...", content = "..." }` to project rounded, wrapped floating popup dialogs with click-outside and `Esc` dismissal.
 3. **Safe Jailed File Reading (`Capability::FsJailRead`):** Use `tunotron.read_file(path)` and `tunotron.file_exists(path)` with lexical and canonical jail checks to safely read local `.lrc` lyrics and text companion files without escaping the music library.
 4. **Monotonic Playback Heartbeat (`on_tick`):** Implement `function plugin.on_tick(pos, dur)` or `event.type == "Tick"` to receive exact 1 Hz integer-second cadence updates synchronized to the monotonic clock.
 5. **Desktop Notifications (`Capability::Notify`):** Call `tunotron.notify(summary, body)` or return `{ action = "Notify", ... }` for async, non-blocking desktop notifications dispatched via system `notify-send`.
 6. **Persistent State Storage (`Capability::PersistentStorage`):** Namespaced JSON state persistence via `tunotron.state.get(key, default)`, `set(key, val)`, `del(key)`, and `save()`. Backed by an in-memory cache with atomic file sync to `$XDG_DATA_HOME/tunotron/plugins/<id>/state.json` and a 256 KB quota ceiling.
+7. **Dedicated Extension Viewports & Form Controls (`Capability::UiOverlay`):** Register full-screen dedicated tab views (`RegisterTab`, `SetExtensionPage`) featuring sliders, option selectors, toggles, push buttons, and dynamic 3D soundstage radar visualizers with real-time `on_form_change` hooks.
 
 ### 📁 Included Reference Plugins
 Check [`examples/plugins/`](examples/plugins/) for fully tested reference implementations:
+- **[`spatial_audio.lua`](examples/plugins/spatial_audio.lua):** 3D / 7D / 8D Spatial Audio Studio. Press `Ctrl+S` or `Tab`/`2` to configure multi-axis binaural orbit speed, trajectory, direction, elevation, room acoustics (cathedral, concert hall, studio), and watch the real-time soundstage radar visualizer.
 - **[`lyrics_viewer.lua`](examples/plugins/lyrics_viewer.lua):** Press `L` to read companion `.lrc` or `.txt` lyrics and display them in a floating modal.
 - **[`sleep_timer.lua`](examples/plugins/sleep_timer.lua):** Press `T` to start a configurable countdown timer (with persistent duration settings via Pillar 6) that automatically pauses audio on expiration.
 - **[`now_playing_notify.lua`](examples/plugins/now_playing_notify.lua):** Dispatches native desktop notifications on track changes and supports on-demand notifications via `N`.

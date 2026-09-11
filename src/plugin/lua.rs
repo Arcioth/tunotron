@@ -638,6 +638,50 @@ fn parse_table_action(tbl: &Table) -> Option<Action> {
             let payload: serde_json::Value = serde_json::to_value(&payload_val).unwrap_or(serde_json::Value::Null);
             Some(Action::Broadcast { event, payload })
         }
+        "RegisterTab" => {
+            let id: String = tbl.get("id").ok()?;
+            let title: String = tbl.get("title").unwrap_or_else(|_| id.clone());
+            let shortcut: Option<String> = tbl.get("shortcut").ok();
+            Some(Action::RegisterTab { id, title, shortcut })
+        }
+        "UnregisterTab" => {
+            let id: String = tbl.get("id").ok()?;
+            Some(Action::UnregisterTab { id })
+        }
+        "SetExtensionPage" => {
+            let page_val: Value = tbl.get("page").ok()?;
+            let page_json: serde_json::Value = serde_json::to_value(&page_val).ok()?;
+            let page: crate::ui::ExtensionPage = serde_json::from_value(page_json).ok()?;
+            Some(Action::SetExtensionPage(Box::new(page)))
+        }
+        "UpdateExtensionPageField" => {
+            let page_id: String = tbl.get("page_id").ok()?;
+            let field_id: String = tbl.get("field_id").ok()?;
+            let val: Value = tbl.get("value").unwrap_or(Value::Nil);
+            let value: serde_json::Value = serde_json::to_value(&val).unwrap_or(serde_json::Value::Null);
+            Some(Action::UpdateExtensionPageField { page_id, field_id, value })
+        }
+        "UpdateRadar" => {
+            let page_id: String = tbl.get("page_id").ok()?;
+            let radar_tbl: Table = tbl.get("radar").ok()?;
+            let angle_rad: f64 = radar_tbl.get("angle").unwrap_or(0.0);
+            let distance: f64 = radar_tbl.get("distance").unwrap_or(1.0);
+            let elevation_deg: f64 = radar_tbl.get("elevation").unwrap_or(0.0);
+            let label: String = radar_tbl.get("label").unwrap_or_default();
+            Some(Action::UpdateRadar {
+                page_id,
+                radar: crate::ui::RadarState {
+                    angle_rad,
+                    distance,
+                    elevation_deg,
+                    label,
+                },
+            })
+        }
+        "SwitchTab" => {
+            let index: usize = tbl.get("index").unwrap_or(0);
+            Some(Action::SwitchTab(index))
+        }
         "PlayTrackIndex" => {
             let index: usize = tbl.get("index").unwrap_or(0);
             Some(Action::PlayTrackIndex(index))
@@ -659,15 +703,16 @@ impl Plugin for LuaPlugin {
         &self.manifest
     }
 
-    fn on_load(&mut self) -> Result<(), String> {
+    fn on_load(&mut self) -> Result<Vec<Action>, String> {
         self.instruction_counter.store(0, Ordering::Relaxed);
         let plugin_tbl = self.plugin_table()?;
         if let Ok(on_load_fn) = plugin_tbl.get::<mlua::Function>("on_load") {
-            on_load_fn
-                .call::<()>(())
+            let res: Value = on_load_fn
+                .call::<Value>(())
                 .map_err(|e| format!("Error in on_load callback for plugin '{}': {}", self.manifest.id, e))?;
+            return Ok(parse_actions_from_value(res));
         }
-        Ok(())
+        Ok(Vec::new())
     }
 
     fn on_event(&mut self, event: &PluginEvent) -> Vec<Action> {
@@ -1210,6 +1255,109 @@ mod tests {
     }
 
     #[test]
+    fn test_spatial_audio_example_plugin() {
+        let plugin_path = Path::new("examples/plugins/spatial_audio.lua");
+        let mut plugin = LuaPlugin::from_file(plugin_path, None).unwrap();
+
+        // 1. Manifest verification
+        let manifest = plugin.manifest();
+        assert_eq!(manifest.id, "org.tunotron.spatial_audio");
+        assert!(manifest.capabilities.contains(&Capability::PlaybackControl));
+        assert!(manifest.capabilities.contains(&Capability::UiOverlay));
+        assert!(manifest.capabilities.contains(&Capability::PersistentStorage));
+        assert!(manifest.capabilities.contains(&Capability::KeyBind));
+        assert_eq!(manifest.keybinds.get("ctrl+s").map(|s| s.as_str()), Some("toggle_spatializer"));
+
+        // 2. on_load registration of tab and page
+        let load_actions = plugin.on_load().unwrap();
+        assert_eq!(load_actions.len(), 2);
+        match &load_actions[0] {
+            Action::RegisterTab { id, title, shortcut } => {
+                assert_eq!(id, "spatial_audio");
+                assert_eq!(title, "3D Spatial");
+                assert_eq!(shortcut.as_deref(), Some("2"));
+            }
+            other => panic!("Expected Action::RegisterTab, got {:?}", other),
+        }
+        match &load_actions[1] {
+            Action::SetExtensionPage(page) => {
+                assert_eq!(page.id, "spatial_audio");
+                assert_eq!(page.fields.len(), 10);
+            }
+            other => panic!("Expected Action::SetExtensionPage, got {:?}", other),
+        }
+
+        // 3. Toggle spatializer active
+        let actions = plugin.on_action("toggle_spatializer", &serde_json::json!({}));
+        assert_eq!(actions.len(), 3);
+        match &actions[1] {
+            Action::SetAudioFilter(filter) => {
+                assert!(filter.starts_with("lavfi=[apulsator="));
+                assert!(filter.contains("stereowiden="));
+            }
+            other => panic!("Expected Action::SetAudioFilter, got {:?}", other),
+        }
+
+        // 4. Form change: adjust speed
+        let actions = plugin.on_action(
+            "on_form_change",
+            &serde_json::json!({ "field": "speed", "value": 0.45 }),
+        );
+        assert!(!actions.is_empty());
+        match &actions[0] {
+            Action::SetAudioFilter(filter) => {
+                assert!(filter.contains("hz=0.45"));
+            }
+            other => panic!("Expected Action::SetAudioFilter, got {:?}", other),
+        }
+
+        // 5. Form change: select Cathedral Echo preset
+        let actions = plugin.on_action(
+            "on_form_change",
+            &serde_json::json!({ "field": "preset", "value": "Cathedral Echo" }),
+        );
+        assert_eq!(actions.len(), 3);
+        match &actions[1] {
+            Action::SetAudioFilter(filter) => {
+                assert!(filter.contains(":420:")); // Cathedral delay ms
+            }
+            other => panic!("Expected Action::SetAudioFilter, got {:?}", other),
+        }
+
+        // 6. Tick hook updates soundstage radar
+        let tick_ev = PluginEvent::Tick {
+            position: 25.0,
+            duration: 180.0,
+        };
+        let actions = plugin.on_event(&tick_ev);
+        assert_eq!(actions.len(), 2);
+        match &actions[0] {
+            Action::UpdateRadar { page_id, radar } => {
+                assert_eq!(page_id, "spatial_audio");
+                assert!(radar.distance > 0.0);
+            }
+            other => panic!("Expected Action::UpdateRadar, got {:?}", other),
+        }
+        match &actions[1] {
+            Action::SetSlot { slot, content } => {
+                assert_eq!(slot, "spatial");
+                assert!(content.contains("[3D:"));
+            }
+            other => panic!("Expected Action::SetSlot, got {:?}", other),
+        }
+
+        // 7. Toggle spatializer off -> filter cleared
+        let actions = plugin.on_action("toggle_spatializer", &serde_json::json!({}));
+        assert_eq!(actions.len(), 3);
+        match &actions[1] {
+            Action::SetAudioFilter(filter) => {
+                assert_eq!(filter, "");
+            }
+            other => panic!("Expected Action::SetAudioFilter, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_lua_plugin_notify_permission_denied() {
         let script = r#"
             local p = {}
@@ -1512,5 +1660,81 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn test_lua_plugin_tabs_pages_and_spatial_hooks() {
+        let script = r#"
+            local p = {}
+            p.manifest = {
+                id = "spatial_audio",
+                name = "3D Spatial Audio",
+                version = "1.0.0",
+                capabilities = { "PlaybackControl", "UiOverlay" }
+            }
+
+            function p.on_load()
+                return {
+                    {
+                        action = "RegisterTab",
+                        id = "spatial_audio",
+                        title = "3D Spatial",
+                        shortcut = "2"
+                    },
+                    {
+                        action = "SetExtensionPage",
+                        page = {
+                            id = "spatial_audio",
+                            title = "3D Spatial Studio",
+                            description = "Binaural soundstage",
+                            fields = {
+                                {
+                                    type = "Slider",
+                                    id = "speed",
+                                    label = "Speed",
+                                    value = 0.25,
+                                    min = 0.0,
+                                    max = 1.0,
+                                    step = 0.05,
+                                    unit = " Hz"
+                                }
+                            },
+                            radar = {
+                                angle = 1.57,
+                                distance = 0.9,
+                                elevation = 10.0,
+                                label = "Front-Right [NE]"
+                            }
+                        }
+                    }
+                }
+            end
+
+            function p.on_action(name, payload)
+                if name == "on_form_change" then
+                    return {
+                        { action = "SetAudioFilter", filter = "lavfi=[apulsator=hz=0.25]" },
+                        { action = "UpdateRadar", page_id = "spatial_audio", radar = { angle = 3.14, distance = 1.0, elevation = 0.0, label = "Behind [S]" } }
+                    }
+                end
+                return {}
+            end
+
+            return p
+        "#;
+
+        let mut plugin = LuaPlugin::from_script(script, "spatial.lua").unwrap();
+
+        // Check on_load actions
+        let load_actions = plugin.on_load().unwrap();
+        assert_eq!(load_actions.len(), 2);
+        assert!(matches!(&load_actions[0], Action::RegisterTab { id, title, .. } if id == "spatial_audio" && title == "3D Spatial"));
+        assert!(matches!(&load_actions[1], Action::SetExtensionPage(page) if page.id == "spatial_audio" && page.title == "3D Spatial Studio"));
+
+        // Check on_action on_form_change
+        let form_actions = plugin.on_action("on_form_change", &serde_json::json!({ "field": "speed", "value": 0.25 }));
+        assert_eq!(form_actions.len(), 2);
+        assert_eq!(form_actions[0], Action::SetAudioFilter("lavfi=[apulsator=hz=0.25]".to_string()));
+        assert!(matches!(&form_actions[1], Action::UpdateRadar { page_id, radar } if page_id == "spatial_audio" && radar.label == "Behind [S]"));
     }
 }

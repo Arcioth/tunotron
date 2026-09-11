@@ -190,6 +190,9 @@ pub struct AppState {
     pub density: ViewDensity,
     pub active_toast: Option<(String, Instant, std::time::Duration)>,
     pub slots: std::collections::HashMap<String, String>,
+    pub tabs: Vec<crate::ui::TabEntry>,
+    pub active_tab: usize,
+    pub extension_pages: std::collections::HashMap<String, crate::ui::ExtensionPage>,
 }
 
 impl AppState {
@@ -216,12 +219,72 @@ impl AppState {
             density: ViewDensity::Comfortable,
             active_toast: None,
             slots: std::collections::HashMap::new(),
+            tabs: vec![crate::ui::TabEntry {
+                id: "browser".to_string(),
+                title: "Library Browser".to_string(),
+                shortcut: Some("1".to_string()),
+                plugin_id: None,
+            }],
+            active_tab: 0,
+            extension_pages: std::collections::HashMap::new(),
         };
 
         let initial_items = read_directory(&canonical_root, &canonical_root);
         let effects = state.set_browser_items(initial_items);
 
         (state, effects)
+    }
+
+    pub fn active_tab_entry(&self) -> Option<&crate::ui::TabEntry> {
+        self.tabs.get(self.active_tab)
+    }
+
+    pub fn active_extension_page(&self) -> Option<&crate::ui::ExtensionPage> {
+        let tab = self.active_tab_entry()?;
+        self.extension_pages.get(&tab.id)
+    }
+
+    pub fn active_extension_page_mut(&mut self) -> Option<&mut crate::ui::ExtensionPage> {
+        let tab_id = self.tabs.get(self.active_tab)?.id.clone();
+        self.extension_pages.get_mut(&tab_id)
+    }
+
+    pub fn register_tab(&mut self, id: String, title: String, shortcut: Option<String>, plugin_id: Option<String>) {
+        if !self.tabs.iter().any(|t| t.id == id) {
+            self.tabs.push(crate::ui::TabEntry { id, title, shortcut, plugin_id });
+        }
+    }
+
+    pub fn unregister_tab(&mut self, id: &str) {
+        if let Some(pos) = self.tabs.iter().position(|t| t.id == id) {
+            self.tabs.remove(pos);
+            if self.active_tab >= self.tabs.len() {
+                self.active_tab = self.tabs.len().saturating_sub(1);
+            }
+        }
+        self.extension_pages.remove(id);
+    }
+
+    pub fn switch_tab(&mut self, index: usize) {
+        if index < self.tabs.len() {
+            self.active_tab = index;
+        }
+    }
+
+    pub fn next_tab(&mut self) {
+        if !self.tabs.is_empty() {
+            self.active_tab = (self.active_tab + 1) % self.tabs.len();
+        }
+    }
+
+    pub fn prev_tab(&mut self) {
+        if !self.tabs.is_empty() {
+            self.active_tab = if self.active_tab == 0 {
+                self.tabs.len().saturating_sub(1)
+            } else {
+                self.active_tab - 1
+            };
+        }
     }
 
     pub fn set_toast(&mut self, message: String, duration_ms: u64) {
@@ -417,6 +480,30 @@ impl AppState {
                     self.clear_slot(&slot);
                     return Vec::new();
                 }
+                Action::RegisterTab { id, title, shortcut } => {
+                    self.register_tab(id, title, shortcut, None);
+                    return Vec::new();
+                }
+                Action::UnregisterTab { id } => {
+                    self.unregister_tab(&id);
+                    return Vec::new();
+                }
+                Action::SetExtensionPage(page) => {
+                    self.extension_pages.insert(page.id.clone(), *page);
+                    return Vec::new();
+                }
+                Action::UpdateExtensionPageField { page_id, field_id, value } => {
+                    if let Some(page) = self.extension_pages.get_mut(&page_id) {
+                        page.update_field_value(&field_id, &value);
+                    }
+                    return Vec::new();
+                }
+                Action::UpdateRadar { page_id, radar } => {
+                    if let Some(page) = self.extension_pages.get_mut(&page_id) {
+                        page.radar = Some(radar);
+                    }
+                    return Vec::new();
+                }
                 Action::Broadcast { event, payload } => {
                     return vec![Effect::Broadcast { event, payload }];
                 }
@@ -458,6 +545,99 @@ impl AppState {
             }
             Action::ClearSlot { slot } => {
                 self.clear_slot(&slot);
+                Vec::new()
+            }
+            Action::SwitchTab(idx) => {
+                self.switch_tab(idx);
+                Vec::new()
+            }
+            Action::NextTab => {
+                self.next_tab();
+                Vec::new()
+            }
+            Action::PrevTab => {
+                self.prev_tab();
+                Vec::new()
+            }
+            Action::RegisterTab { id, title, shortcut } => {
+                self.register_tab(id, title, shortcut, None);
+                Vec::new()
+            }
+            Action::UnregisterTab { id } => {
+                self.unregister_tab(&id);
+                Vec::new()
+            }
+            Action::SetExtensionPage(page) => {
+                self.extension_pages.insert(page.id.clone(), *page);
+                Vec::new()
+            }
+            Action::UpdateExtensionPageField { page_id, field_id, value } => {
+                if let Some(page) = self.extension_pages.get_mut(&page_id) {
+                    page.update_field_value(&field_id, &value);
+                }
+                Vec::new()
+            }
+            Action::UpdateRadar { page_id, radar } => {
+                if let Some(page) = self.extension_pages.get_mut(&page_id) {
+                    page.radar = Some(radar);
+                }
+                Vec::new()
+            }
+            Action::FormNavUp => {
+                if let Some(page) = self.active_extension_page_mut() {
+                    page.nav_up();
+                }
+                Vec::new()
+            }
+            Action::FormNavDown => {
+                if let Some(page) = self.active_extension_page_mut() {
+                    page.nav_down();
+                }
+                Vec::new()
+            }
+            Action::FormAdjustLeft => {
+                if let Some(tab) = self.active_tab_entry() {
+                    let plugin_id = tab.plugin_id.clone().unwrap_or_else(|| tab.id.clone());
+                    if let Some(page) = self.active_extension_page_mut() {
+                        if let Some((field_id, new_val)) = page.adjust_left() {
+                            return vec![Effect::PluginAction {
+                                plugin_id,
+                                name: "on_form_change".to_string(),
+                                payload: serde_json::json!({ "field": field_id, "value": new_val }),
+                            }];
+                        }
+                    }
+                }
+                Vec::new()
+            }
+            Action::FormAdjustRight => {
+                if let Some(tab) = self.active_tab_entry() {
+                    let plugin_id = tab.plugin_id.clone().unwrap_or_else(|| tab.id.clone());
+                    if let Some(page) = self.active_extension_page_mut() {
+                        if let Some((field_id, new_val)) = page.adjust_right() {
+                            return vec![Effect::PluginAction {
+                                plugin_id,
+                                name: "on_form_change".to_string(),
+                                payload: serde_json::json!({ "field": field_id, "value": new_val }),
+                            }];
+                        }
+                    }
+                }
+                Vec::new()
+            }
+            Action::FormActivate => {
+                if let Some(tab) = self.active_tab_entry() {
+                    let plugin_id = tab.plugin_id.clone().unwrap_or_else(|| tab.id.clone());
+                    if let Some(page) = self.active_extension_page_mut() {
+                        if let Some((field_id, new_val)) = page.activate() {
+                            return vec![Effect::PluginAction {
+                                plugin_id,
+                                name: "on_form_change".to_string(),
+                                payload: serde_json::json!({ "field": field_id, "value": new_val }),
+                            }];
+                        }
+                    }
+                }
                 Vec::new()
             }
             Action::CloseTopWindow => {
@@ -1298,5 +1478,114 @@ mod tests {
             }]
         );
     }
+
+    #[test]
+    fn test_tabs_and_extension_page_lifecycle() {
+        use crate::ui::page::{ExtensionPage, FormField, RadarState};
+
+        let (mut app, _) = AppState::new(std::env::temp_dir());
+        let mut geom = UiGeom::default();
+
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active_tab, 0);
+
+        // Register new tab
+        let effects = app.reduce(
+            Action::RegisterTab {
+                id: "spatial_audio".to_string(),
+                title: "3D Spatial".to_string(),
+                shortcut: Some("2".to_string()),
+            },
+            &mut geom,
+        );
+        assert!(effects.is_empty());
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs[1].id, "spatial_audio");
+
+        // Set extension page
+        let page = ExtensionPage::new("spatial_audio".into(), "3D Spatial Studio".into())
+            .with_fields(vec![
+                FormField::Slider {
+                    id: "speed".into(),
+                    label: "Orbit Speed".into(),
+                    value: 0.2,
+                    min: 0.0,
+                    max: 1.0,
+                    step: 0.05,
+                    unit: "Hz".into(),
+                },
+                FormField::Toggle {
+                    id: "reverb".into(),
+                    label: "Room Reverb".into(),
+                    checked: false,
+                },
+            ])
+            .with_radar(RadarState {
+                angle_rad: 0.0,
+                distance: 1.0,
+                elevation_deg: 0.0,
+                label: "Orbit [Front]".into(),
+            });
+
+        let effects = app.reduce(Action::SetExtensionPage(Box::new(page)), &mut geom);
+        assert!(effects.is_empty());
+        assert!(app.extension_pages.contains_key("spatial_audio"));
+
+        // Switch Tab
+        app.reduce(Action::NextTab, &mut geom);
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.active_tab_entry().map(|t| t.id.as_str()), Some("spatial_audio"));
+
+        // Adjust form field right -> emits on_form_change Effect
+        let effects = app.reduce(Action::FormAdjustRight, &mut geom);
+        assert_eq!(effects.len(), 1);
+        match &effects[0] {
+            Effect::PluginAction { plugin_id, name, payload } => {
+                assert_eq!(plugin_id, "spatial_audio");
+                assert_eq!(name, "on_form_change");
+                assert_eq!(payload["field"], "speed");
+                assert_eq!(payload["value"], 0.25);
+            }
+            other => panic!("Unexpected effect: {:?}", other),
+        }
+
+        // Navigate form down and activate toggle
+        app.reduce(Action::FormNavDown, &mut geom);
+        let effects = app.reduce(Action::FormActivate, &mut geom);
+        assert_eq!(effects.len(), 1);
+        match &effects[0] {
+            Effect::PluginAction { plugin_id, name, payload } => {
+                assert_eq!(plugin_id, "spatial_audio");
+                assert_eq!(name, "on_form_change");
+                assert_eq!(payload["field"], "reverb");
+                assert_eq!(payload["value"], true);
+            }
+            other => panic!("Unexpected effect: {:?}", other),
+        }
+
+        // Update Radar
+        app.reduce(
+            Action::UpdateRadar {
+                page_id: "spatial_audio".to_string(),
+                radar: RadarState {
+                    angle_rad: 1.57,
+                    distance: 0.8,
+                    elevation_deg: 15.0,
+                    label: "Orbit [Right]".into(),
+                },
+            },
+            &mut geom,
+        );
+        let radar = app.extension_pages.get("spatial_audio").unwrap().radar.as_ref().unwrap();
+        assert_eq!(radar.angle_rad, 1.57);
+        assert_eq!(radar.elevation_deg, 15.0);
+
+        // Unregister Tab
+        app.reduce(Action::UnregisterTab { id: "spatial_audio".to_string() }, &mut geom);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active_tab, 0);
+        assert!(!app.extension_pages.contains_key("spatial_audio"));
+    }
 }
+
 

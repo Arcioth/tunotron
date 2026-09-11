@@ -124,7 +124,7 @@ async fn main() -> Result<()> {
     let _ = plugin_mgr.register(Box::new(plugin::TrackLoggerPlugin::new()));
 
     let plugin_dir = plugin::default_plugin_dir();
-    let user_plugins_loaded = plugin::load_plugins_from_dir(&plugin_dir, Some(&music_dir), &mut plugin_mgr);
+    let (user_plugins_loaded, initial_envelopes) = plugin::load_plugins_from_dir(&plugin_dir, Some(&music_dir), &mut plugin_mgr);
     info!(
         "Plugins initialized: {} built-in, {} external from {}",
         plugin_mgr.len().saturating_sub(user_plugins_loaded),
@@ -136,6 +136,11 @@ async fn main() -> Result<()> {
     execute_effects(init_effects, &cmd_tx, &event_tx, &mut plugin_mgr);
     let mut geom = UiGeom::new();
     geom.clamp_selection(app.browser_items.len());
+
+    for env in initial_envelopes {
+        let effects = app.reduce(env.action, &mut geom);
+        execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
+    }
 
     let ipc_handle = match ipc::spawn_ipc_server(event_tx.clone(), ipc::TunotronStatus::from_app(&app)) {
         Ok(h) => {
@@ -181,6 +186,45 @@ async fn main() -> Result<()> {
             maybe_evt = reader.next() => {
                 match maybe_evt {
                     Some(Ok(CrosstermEvent::Key(key))) if key.kind == KeyEventKind::Press => {
+                        use crossterm::event::KeyCode;
+
+                        // Global Tab cycling
+                        if key.code == KeyCode::Tab {
+                            let effects = app.reduce(Action::NextTab, &mut geom);
+                            execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
+                            should_render = true;
+                            continue;
+                        } else if key.code == KeyCode::BackTab {
+                            let effects = app.reduce(Action::PrevTab, &mut geom);
+                            execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
+                            should_render = true;
+                            continue;
+                        }
+
+                        // If an extension page tab is active (and no modal is open), route arrows, enter, space to form controls
+                        if app.active_tab > 0 && !geom.has_window() {
+                            let form_action = match key.code {
+                                KeyCode::Up => Some(Action::FormNavUp),
+                                KeyCode::Down => Some(Action::FormNavDown),
+                                KeyCode::Left => Some(Action::FormAdjustLeft),
+                                KeyCode::Right => Some(Action::FormAdjustRight),
+                                KeyCode::Enter | KeyCode::Char(' ') => Some(Action::FormActivate),
+                                KeyCode::Esc => Some(Action::SwitchTab(0)),
+                                KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+                                    let digit_idx = (c as usize).saturating_sub('1' as usize);
+                                    Some(Action::SwitchTab(digit_idx))
+                                }
+                                _ => None,
+                            };
+
+                            if let Some(action) = form_action {
+                                let effects = app.reduce(action, &mut geom);
+                                execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
+                                should_render = true;
+                                continue;
+                            }
+                        }
+
                         let chord = KeyChord::from(key);
                         if let Some(action) = key_state_machine.feed(chord, &keymap) {
                             let effects = app.reduce(action, &mut geom);

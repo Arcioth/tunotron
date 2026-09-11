@@ -22,7 +22,7 @@ impl PluginManager {
         }
     }
 
-    pub fn register(&mut self, mut plugin: Box<dyn Plugin>) -> Result<(), String> {
+    pub fn register(&mut self, mut plugin: Box<dyn Plugin>) -> Result<Vec<ActionEnvelope>, String> {
         let id = plugin.manifest().id.clone();
         if self.plugins.iter().any(|p| p.plugin.manifest().id == id) {
             return Err(format!("Plugin with id '{}' is already registered", id));
@@ -42,20 +42,35 @@ impl PluginManager {
             }
         }
 
-        plugin.on_load()?;
+        let raw_actions = plugin.on_load()?;
+        let manifest = plugin.manifest().clone();
         tracing::info!(
             "Registered plugin '{}' [{}] v{} (granted capabilities: {:?})",
-            plugin.manifest().name,
+            manifest.name,
             id,
-            plugin.manifest().version,
-            plugin.manifest().capabilities
+            manifest.version,
+            manifest.capabilities
         );
         self.plugins.push(ManagedPlugin {
             plugin,
             strikes: 0,
             disabled: false,
         });
-        Ok(())
+
+        let mut envelopes = Vec::new();
+        for action in raw_actions {
+            let envelope = ActionEnvelope::plugin(&manifest.id, action);
+            if envelope.source.is_permitted(&envelope.action, &manifest.capabilities) {
+                envelopes.push(envelope);
+            } else {
+                tracing::warn!(
+                    "Plugin '{}' emitted action '{:?}' on load without required capability; suppressed",
+                    manifest.id,
+                    envelope.action
+                );
+            }
+        }
+        Ok(envelopes)
     }
 
     pub fn unregister(&mut self, id: &str) -> bool {
@@ -261,9 +276,9 @@ mod tests {
             &self.manifest
         }
 
-        fn on_load(&mut self) -> Result<(), String> {
+        fn on_load(&mut self) -> Result<Vec<Action>, String> {
             self.loaded = true;
-            Ok(())
+            Ok(Vec::new())
         }
 
         fn on_event(&mut self, _event: &PluginEvent) -> Vec<Action> {
@@ -391,8 +406,8 @@ mod tests {
             fn manifest(&self) -> &PluginManifest {
                 &self.manifest
             }
-            fn on_load(&mut self) -> Result<(), String> {
-                Ok(())
+            fn on_load(&mut self) -> Result<Vec<Action>, String> {
+                Ok(Vec::new())
             }
             fn on_event(&mut self, _event: &PluginEvent) -> Vec<Action> {
                 std::thread::sleep(std::time::Duration::from_millis(55));

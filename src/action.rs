@@ -146,6 +146,34 @@ pub enum Action {
         slot: String,
     },
 
+    // Tabs & Extension View Navigation
+    SwitchTab(usize),
+    NextTab,
+    PrevTab,
+    RegisterTab {
+        id: String,
+        title: String,
+        shortcut: Option<String>,
+    },
+    UnregisterTab {
+        id: String,
+    },
+    SetExtensionPage(Box<crate::ui::ExtensionPage>),
+    UpdateExtensionPageField {
+        page_id: String,
+        field_id: String,
+        value: serde_json::Value,
+    },
+    UpdateRadar {
+        page_id: String,
+        radar: crate::ui::RadarState,
+    },
+    FormNavUp,
+    FormNavDown,
+    FormAdjustLeft,
+    FormAdjustRight,
+    FormActivate,
+
     // Dynamic Extension Actions
     Plugin {
         plugin_id: String,
@@ -250,7 +278,12 @@ impl Action {
             | Action::ShowModal { .. }
             | Action::ShowToast { .. }
             | Action::SetSlot { .. }
-            | Action::ClearSlot { .. } => ActionPermission::Capability(Capability::UiOverlay),
+            | Action::ClearSlot { .. }
+            | Action::RegisterTab { .. }
+            | Action::UnregisterTab { .. }
+            | Action::SetExtensionPage(_)
+            | Action::UpdateExtensionPageField { .. }
+            | Action::UpdateRadar { .. } => ActionPermission::Capability(Capability::UiOverlay),
 
             Action::Notify { .. } => ActionPermission::Capability(Capability::Notify),
 
@@ -260,7 +293,15 @@ impl Action {
             | Action::MoveToBottom
             | Action::HalfPageDown
             | Action::HalfPageUp
-            | Action::SelectIndex(_) => ActionPermission::Public,
+            | Action::SelectIndex(_)
+            | Action::SwitchTab(_)
+            | Action::NextTab
+            | Action::PrevTab
+            | Action::FormNavUp
+            | Action::FormNavDown
+            | Action::FormAdjustLeft
+            | Action::FormAdjustRight
+            | Action::FormActivate => ActionPermission::Public,
 
             Action::Plugin { .. } => ActionPermission::Public,
 

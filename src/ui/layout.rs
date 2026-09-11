@@ -28,7 +28,13 @@ pub fn render_app(frame: &mut Frame, state: &AppState, geom: &mut UiGeom, theme:
     geom.browser_rect = chunks[1];
 
     render_header(frame, chunks[0], state, theme);
-    render_browser_table(frame, chunks[1], state, geom, theme);
+    if state.active_tab == 0 {
+        render_browser_table(frame, chunks[1], state, geom, theme);
+    } else if let Some(page) = state.active_extension_page() {
+        crate::ui::render_extension_page(frame, chunks[1], page, theme);
+    } else {
+        render_browser_table(frame, chunks[1], state, geom, theme);
+    }
     render_player_bar(frame, chunks[2], state, geom, theme);
 
     // Floating Window Stack Layer
@@ -103,6 +109,21 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
             format!(" | {}", topbar_slot),
             Style::default().fg(theme.gauge_fill).add_modifier(Modifier::BOLD),
         ));
+    }
+
+    if state.tabs.len() > 1 {
+        spans.push(Span::raw(" | Tabs: "));
+        for (idx, tab) in state.tabs.iter().enumerate() {
+            let is_active = idx == state.active_tab;
+            let num = idx + 1;
+            let title_style = if is_active {
+                Style::default().bg(theme.selection_bg).fg(theme.selection_fg).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.secondary)
+            };
+            spans.push(Span::styled(format!("[{}:{}]", num, tab.title), title_style));
+            spans.push(Span::raw(" "));
+        }
     }
 
     let header_line = Line::from(spans);

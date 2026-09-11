@@ -3,6 +3,8 @@ use super::lua::LuaPlugin;
 use super::manager::PluginManager;
 use super::traits::Plugin;
 
+use crate::action::ActionEnvelope;
+
 pub fn default_plugin_dir() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -12,22 +14,26 @@ pub fn default_plugin_dir() -> PathBuf {
         .join("tunotron/plugins")
 }
 
-pub fn load_plugins_from_dir(dir: &Path, music_root: Option<&Path>, mgr: &mut PluginManager) -> usize {
+pub fn load_plugins_from_dir(
+    dir: &Path,
+    music_root: Option<&Path>,
+    mgr: &mut PluginManager,
+) -> (usize, Vec<ActionEnvelope>) {
     if !dir.exists() || !dir.is_dir() {
-        return 0;
+        return (0, Vec::new());
     }
 
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
+        return (0, Vec::new());
     };
 
     let mut loaded_count = 0;
+    let mut initial_envelopes = Vec::new();
 
     let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
     paths.sort();
 
     for path in paths {
-
         let plugin_file = if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("lua") {
             Some(path)
         } else if path.is_dir() {
@@ -45,11 +51,15 @@ pub fn load_plugins_from_dir(dir: &Path, music_root: Option<&Path>, mgr: &mut Pl
             match LuaPlugin::from_file(&target, music_root) {
                 Ok(plugin) => {
                     let id = plugin.manifest().id.clone();
-                    if let Err(e) = mgr.register(Box::new(plugin)) {
-                        tracing::error!("Failed to register Lua plugin from '{}': {}", target.display(), e);
-                    } else {
-                        tracing::info!("Loaded Lua plugin '{}' from {}", id, target.display());
-                        loaded_count += 1;
+                    match mgr.register(Box::new(plugin)) {
+                        Ok(envelopes) => {
+                            tracing::info!("Loaded Lua plugin '{}' from {}", id, target.display());
+                            loaded_count += 1;
+                            initial_envelopes.extend(envelopes);
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to register Lua plugin from '{}': {}", target.display(), e);
+                        }
                     }
                 }
                 Err(e) => {
@@ -59,7 +69,7 @@ pub fn load_plugins_from_dir(dir: &Path, music_root: Option<&Path>, mgr: &mut Pl
         }
     }
 
-    loaded_count
+    (loaded_count, initial_envelopes)
 }
 
 fn dirs_home() -> PathBuf {

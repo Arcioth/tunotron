@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.8] - 2026-09-11 — Supercharged Extensions: Viewport Pages, Interactive Forms & 3D Spatial Audio Studio
+
+This release supercharges Tunotron's extension ecosystem by introducing **Pillar 7: Dedicated Extension Viewports & Form Framework**, dynamic real-time **3D Soundstage Radar Visualization**, and the reference **3D / 7D / 8D Spatial Audio Studio** plugin with binaural orbital audio simulation, room acoustics modeling, and preset persistence.
+
+### 🎛️ Pillar 7: Dedicated Extension Viewports & Interactive Forms
+- **Multi-Tab Architecture ([`src/ui/page.rs`](file:///home/arcioth/Documents/tunotron/src/ui/page.rs), [`src/app.rs`](file:///home/arcioth/Documents/tunotron/src/app.rs)):**
+  - Added `TabEntry` model and tab switcher allowing plugins to register full dedicated pages alongside the default Library Browser (`Action::RegisterTab`, `Action::UnregisterTab`).
+  - Seamless tab cycling via `Tab` / `BackTab` and direct jumping with `1` through `9`.
+  - Header displays active tabs with accent highlights and shortcut badges.
+- **Rich Interactive Form Controls ([`src/ui/page.rs`](file:///home/arcioth/Documents/tunotron/src/ui/page.rs)):**
+  - Declarative form components: `Slider`, `Select`, `Toggle`, `Button`, `Text`.
+  - Intuitive navigation: `↑` / `↓` steps between fields, `←` / `→` adjusts values with custom step sizes and units, `<Enter>` / `<Space>` activates toggles and triggers buttons, `<Esc>` returns to the library browser.
+  - Field adjustments emit `Effect::PluginAction { name: "on_form_change", payload }` into the Lua plugin runtime with zero latency.
+- **Dynamic 3D Soundstage Radar Visualizer ([`src/ui/page.rs`](file:///home/arcioth/Documents/tunotron/src/ui/page.rs)):**
+  - Integrated ASCII orbital soundstage radar mapping listener coordinates, azimuth angle, elevation, and 8-cardinal compass heading (`Front [N]`, `Right Ear [E]`, `Behind [S]`, etc.).
+  - Real-time zero-allocation updates via `Action::UpdateRadar`.
+
+### 🎧 3D / 7D / 8D Spatial Audio Studio Plugin ([`examples/plugins/spatial_audio.lua`](file:///home/arcioth/Documents/tunotron/examples/plugins/spatial_audio.lua))
+- **Multi-Axis Revolving Binaural Audio:**
+  - Configurable orbit speed (0.01 – 1.50 Hz), trajectory (Circular, Figure-8, Spiral, Pendulum, Ear-to-Ear), direction (Clockwise / Counter-Clockwise), and soundstage elevation (-90° to +90°).
+  - Psychoacoustic pinna elevation notch filter (~6.2 kHz) and headphone acoustic crossfeed.
+- **Acoustic Room Environment Simulation:**
+  - Presets for Dry Studio, Living Room, Club Stage, Concert Hall, Cathedral, and Cosmic Void.
+  - Dynamic room reverb reflection modeling with configurable reverb depth.
+- **Studio Presets & State Persistence:**
+  - Built-in presets: *Default 8D Orbit*, *Concert Dome*, *Ear-to-Ear Whisper*, *Cathedral Echo*, *Cosmic Swirl*, *Binaural Pendulum*.
+  - Persistent state storage via Pillar 6 (`tunotron.state.save`) saving user presets across sessions.
+- **Real-Time Orbit Tracking:**
+  - 1 Hz tick hook synchronizes the 3D radar visualizer and topbar status badge with the current playback orbit.
+
+### 🧪 Automated Test Suite Expansion
+- Added unit tests for tab lifecycle, form navigation, radar updates, and plugin action emissions.
+- Added comprehensive end-to-end integration test verifying `spatial_audio.lua` load, form adjustments, preset switching, radar animation, and audio filter generation.
+- **70 automated tests passing**; 0 warnings on `-D warnings`.
+
+---
+
 ## [0.3.7] - 2026-09-11 — Sandboxing Hardening: CPU Instruction Budget & Cross-Plugin Isolation
 
 This release hardens the plugin sandbox against CPU starvation attacks, prevents cross-plugin action spoofing, eliminates VM escapes, and enhances host observability:

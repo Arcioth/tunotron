@@ -80,8 +80,9 @@ return {
 ### Phase 4.1: Pure Audio & Precision Tier (Current Sprint)
 Extensions that utilize existing `PlaybackControl`, `KeyBind`, `PersistentStorage`, and `SetAudioFilter` hooks:
 - [x] Host hooks deployed (`SeekAbsolute`, `SetAudioFilter`, `ShowToast`, `SetSlot`, Unix IPC).
+- [x] **Supercharged Extension Viewport & Interactive Forms:** Multi-tab support (`TabEntry`), interactive form fields (`Slider`, `Select`, `Toggle`, `Button`, `Text`), dynamic real-time 3D soundstage radar visualizer (`RadarState`).
+- [x] **#20 7D / 8D Spatial Audio Studio:** Deployed reference plugin ([`examples/plugins/spatial_audio.lua`](examples/plugins/spatial_audio.lua)) featuring multi-axis binaural orbit, pinna elevation simulation, acoustic room presets, real-time radar tracking, and persistent state storage.
 - [ ] **#10 Equalizer:** Implement presets (Bass Boost, Treble, Vocal, Acoustic, Flat).
-- [ ] **#20 7D / 8D Audio:** Implement orbital panning and spatial depth presets.
 - [ ] **#14 Section Loops:** Implement A-B mark keybindings (`[` to mark A, `]` to mark B, `\` to clear).
 - [ ] **#9 Sleep Timers v2:** Migrate to `SetSlot` countdown badge and `ShowToast` alert.
 

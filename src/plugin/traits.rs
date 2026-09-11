@@ -37,8 +37,8 @@ pub enum PluginEvent {
 pub trait Plugin: Send {
     fn manifest(&self) -> &PluginManifest;
 
-    fn on_load(&mut self) -> Result<(), String> {
-        Ok(())
+    fn on_load(&mut self) -> Result<Vec<Action>, String> {
+        Ok(Vec::new())
     }
 
     fn on_event(&mut self, _event: &PluginEvent) -> Vec<Action> {
