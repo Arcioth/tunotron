@@ -1275,7 +1275,7 @@ mod tests {
             Action::RegisterTab { id, title, shortcut } => {
                 assert_eq!(id, "spatial_audio");
                 assert_eq!(title, "3D Spatial");
-                assert_eq!(shortcut.as_deref(), Some("2"));
+                assert_eq!(shortcut.as_deref(), Some("3"));
             }
             other => panic!("Expected Action::RegisterTab, got {:?}", other),
         }

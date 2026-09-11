@@ -14,6 +14,8 @@ pub struct UiGeom {
     pub browser_rect: Rect,
     pub browser_rows_rect: Rect,
     pub progress_rect: Rect,
+    pub header_rect: Rect,
+    pub tab_rects: Vec<(Rect, usize)>,
     pub window_stack: Vec<WindowId>,
     pub modal_rect: Rect,
     pub modal_content: Option<ModalContent>,

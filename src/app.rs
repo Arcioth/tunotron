@@ -193,6 +193,22 @@ pub struct AppState {
     pub tabs: Vec<crate::ui::TabEntry>,
     pub active_tab: usize,
     pub extension_pages: std::collections::HashMap<String, crate::ui::ExtensionPage>,
+    pub plugins: Vec<PluginInfo>,
+    pub extension_manager_selected: usize,
+    pub extension_search_query: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginInfo {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub capabilities: Vec<crate::action::Capability>,
+    pub keybinds: std::collections::HashMap<String, String>,
+    pub disabled: bool,
+    pub is_builtin: bool,
+    pub strikes: u32,
 }
 
 impl AppState {
@@ -219,14 +235,25 @@ impl AppState {
             density: ViewDensity::Comfortable,
             active_toast: None,
             slots: std::collections::HashMap::new(),
-            tabs: vec![crate::ui::TabEntry {
-                id: "browser".to_string(),
-                title: "Library Browser".to_string(),
-                shortcut: Some("1".to_string()),
-                plugin_id: None,
-            }],
+            tabs: vec![
+                crate::ui::TabEntry {
+                    id: "browser".to_string(),
+                    title: "Library Browser".to_string(),
+                    shortcut: Some("1".to_string()),
+                    plugin_id: None,
+                },
+                crate::ui::TabEntry {
+                    id: "extensions".to_string(),
+                    title: "Extensions".to_string(),
+                    shortcut: Some("2".to_string()),
+                    plugin_id: None,
+                },
+            ],
             active_tab: 0,
             extension_pages: std::collections::HashMap::new(),
+            plugins: Vec::new(),
+            extension_manager_selected: 0,
+            extension_search_query: String::new(),
         };
 
         let initial_items = read_directory(&canonical_root, &canonical_root);
@@ -284,6 +311,13 @@ impl AppState {
             } else {
                 self.active_tab - 1
             };
+        }
+    }
+
+    pub fn sync_plugins(&mut self, infos: Vec<PluginInfo>) {
+        self.plugins = infos;
+        if self.extension_manager_selected >= self.plugins.len() && !self.plugins.is_empty() {
+            self.extension_manager_selected = self.plugins.len() - 1;
         }
     }
 
@@ -638,6 +672,32 @@ impl AppState {
                         }
                     }
                 }
+                Vec::new()
+            }
+            Action::ExtensionNavUp => {
+                if self.extension_manager_selected > 0 {
+                    self.extension_manager_selected -= 1;
+                }
+                Vec::new()
+            }
+            Action::ExtensionNavDown => {
+                if !self.plugins.is_empty() && self.extension_manager_selected + 1 < self.plugins.len() {
+                    self.extension_manager_selected += 1;
+                }
+                Vec::new()
+            }
+            Action::ToggleSelectedPlugin => {
+                if let Some(plugin) = self.plugins.get(self.extension_manager_selected) {
+                    vec![Effect::TogglePlugin(plugin.id.clone())]
+                } else {
+                    Vec::new()
+                }
+            }
+            Action::TogglePlugin(id) => {
+                vec![Effect::TogglePlugin(id)]
+            }
+            Action::SyncPlugins(infos) => {
+                self.sync_plugins(infos);
                 Vec::new()
             }
             Action::CloseTopWindow => {
@@ -1486,7 +1546,7 @@ mod tests {
         let (mut app, _) = AppState::new(std::env::temp_dir());
         let mut geom = UiGeom::default();
 
-        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs.len(), 2);
         assert_eq!(app.active_tab, 0);
 
         // Register new tab
@@ -1494,13 +1554,13 @@ mod tests {
             Action::RegisterTab {
                 id: "spatial_audio".to_string(),
                 title: "3D Spatial".to_string(),
-                shortcut: Some("2".to_string()),
+                shortcut: Some("3".to_string()),
             },
             &mut geom,
         );
         assert!(effects.is_empty());
-        assert_eq!(app.tabs.len(), 2);
-        assert_eq!(app.tabs[1].id, "spatial_audio");
+        assert_eq!(app.tabs.len(), 3);
+        assert_eq!(app.tabs[2].id, "spatial_audio");
 
         // Set extension page
         let page = ExtensionPage::new("spatial_audio".into(), "3D Spatial Studio".into())
@@ -1531,9 +1591,9 @@ mod tests {
         assert!(effects.is_empty());
         assert!(app.extension_pages.contains_key("spatial_audio"));
 
-        // Switch Tab
-        app.reduce(Action::NextTab, &mut geom);
-        assert_eq!(app.active_tab, 1);
+        // Switch to Tab 2 (spatial_audio)
+        app.reduce(Action::SwitchTab(2), &mut geom);
+        assert_eq!(app.active_tab, 2);
         assert_eq!(app.active_tab_entry().map(|t| t.id.as_str()), Some("spatial_audio"));
 
         // Adjust form field right -> emits on_form_change Effect
@@ -1582,8 +1642,8 @@ mod tests {
 
         // Unregister Tab
         app.reduce(Action::UnregisterTab { id: "spatial_audio".to_string() }, &mut geom);
-        assert_eq!(app.tabs.len(), 1);
-        assert_eq!(app.active_tab, 0);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1);
         assert!(!app.extension_pages.contains_key("spatial_audio"));
     }
 }

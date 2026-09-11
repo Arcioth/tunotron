@@ -51,6 +51,10 @@ pub fn load_plugins_from_dir(
             match LuaPlugin::from_file(&target, music_root) {
                 Ok(plugin) => {
                     let id = plugin.manifest().id.clone();
+                    if mgr.contains(&id) {
+                        tracing::debug!("Skipping plugin '{}' from '{}': already registered", id, target.display());
+                        continue;
+                    }
                     match mgr.register(Box::new(plugin)) {
                         Ok(envelopes) => {
                             tracing::info!("Loaded Lua plugin '{}' from {}", id, target.display());

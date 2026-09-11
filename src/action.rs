@@ -22,6 +22,7 @@ pub enum Effect {
         event: String,
         payload: serde_json::Value,
     },
+    TogglePlugin(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -174,6 +175,13 @@ pub enum Action {
     FormAdjustRight,
     FormActivate,
 
+    // Extension Manager & Lifecycle
+    ExtensionNavUp,
+    ExtensionNavDown,
+    ToggleSelectedPlugin,
+    TogglePlugin(String),
+    SyncPlugins(Vec<crate::app::PluginInfo>),
+
     // Dynamic Extension Actions
     Plugin {
         plugin_id: String,
@@ -301,7 +309,12 @@ impl Action {
             | Action::FormNavDown
             | Action::FormAdjustLeft
             | Action::FormAdjustRight
-            | Action::FormActivate => ActionPermission::Public,
+            | Action::FormActivate
+            | Action::ExtensionNavUp
+            | Action::ExtensionNavDown
+            | Action::ToggleSelectedPlugin
+            | Action::TogglePlugin(_)
+            | Action::SyncPlugins(_) => ActionPermission::Public,
 
             Action::Plugin { .. } => ActionPermission::Public,
 

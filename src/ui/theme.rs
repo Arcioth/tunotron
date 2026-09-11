@@ -14,6 +14,7 @@ pub struct Theme {
     pub border: Color,
     pub gauge_fill: Color,
     pub gauge_bg: Color,
+    pub error: Color,
 }
 
 impl Theme {
@@ -29,6 +30,7 @@ impl Theme {
             border: Color::Rgb(88, 91, 112),          // Surface2
             gauge_fill: Color::Rgb(166, 227, 161),    // Green
             gauge_bg: Color::Rgb(49, 50, 68),         // Surface0
+            error: Color::Rgb(243, 139, 168),         // Red
         }
     }
 
@@ -44,6 +46,7 @@ impl Theme {
             border: Color::Rgb(76, 86, 106),
             gauge_fill: Color::Rgb(163, 190, 140),
             gauge_bg: Color::Rgb(59, 66, 82),
+            error: Color::Rgb(191, 97, 106),          // Red
         }
     }
 
@@ -59,6 +62,7 @@ impl Theme {
             border: Color::DarkGray,
             gauge_fill: Color::Green,
             gauge_bg: Color::DarkGray,
+            error: Color::Red,
         }
     }
 }

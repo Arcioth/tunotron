@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph},
+    widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table},
     Frame,
 };
 use serde::{Deserialize, Serialize};
@@ -487,6 +487,187 @@ fn render_spatial_radar(
 
     let para = Paragraph::new(lines);
     frame.render_widget(para, inner);
+}
+
+pub fn render_extension_manager(
+    frame: &mut Frame,
+    area: Rect,
+    state: &crate::app::AppState,
+    theme: &Theme,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Top Banner
+            Constraint::Min(8),    // Plugins Table
+            Constraint::Length(9), // Selected Plugin Inspector
+        ])
+        .split(area);
+
+    // 1. Top Banner
+    let active_count = state.plugins.iter().filter(|p| !p.disabled).count();
+    let total_count = state.plugins.len();
+    let banner_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent))
+        .title(" 🔌 Extensions & Capabilities Manager ");
+
+    let filter_label = if state.extension_search_query.is_empty() {
+        "All".to_string()
+    } else {
+        format!("\"{}\"", state.extension_search_query)
+    };
+
+    let banner_spans = vec![
+        Span::styled(" Installed: ", Style::default().fg(theme.secondary)),
+        Span::styled(format!("{} plugins", total_count), Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)),
+        Span::styled("   Active: ", Style::default().fg(theme.secondary)),
+        Span::styled(format!("{} active", active_count), Style::default().fg(theme.gauge_fill).add_modifier(Modifier::BOLD)),
+        Span::styled("   Filter: ", Style::default().fg(theme.secondary)),
+        Span::styled(filter_label, Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+        Span::styled("   Sandbox: ", Style::default().fg(theme.secondary)),
+        Span::styled("Lua 5.4 | 16 MB RSS cap | 250k inst budget", Style::default().fg(theme.accent)),
+    ];
+    let banner_para = Paragraph::new(Line::from(banner_spans)).block(banner_block);
+    frame.render_widget(banner_para, chunks[0]);
+
+    // 2. Plugins Table
+    let table_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .title(" Registered Plugins ");
+
+    if state.plugins.is_empty() {
+        let empty_row = Row::new(vec![Cell::from(" No plugins loaded. Place Lua scripts in ~/.config/tunotron/plugins/ or examples/plugins/")]);
+        let table = Table::new(vec![empty_row], [Constraint::Percentage(100)]).block(table_block);
+        frame.render_widget(table, chunks[1]);
+    } else {
+        let header_style = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
+        let header = Row::new(vec![
+            Cell::from(" STATUS"),
+            Cell::from("NAME & IDENTIFIER"),
+            Cell::from("VER"),
+            Cell::from("GRANTED CAPABILITIES"),
+            Cell::from("HOTKEYS"),
+        ])
+        .style(header_style)
+        .bottom_margin(1);
+
+        let rows: Vec<Row> = state.plugins.iter().enumerate().map(|(idx, plugin)| {
+            let is_selected = idx == state.extension_manager_selected;
+            let (status_str, status_style) = if plugin.disabled {
+                (" [○ Off] ", Style::default().fg(theme.secondary))
+            } else {
+                (" [● Active] ", Style::default().fg(theme.gauge_fill).add_modifier(Modifier::BOLD))
+            };
+
+            let name_cell = format!("{} ({})", plugin.name, plugin.id);
+            let caps_str = if plugin.capabilities.is_empty() {
+                "None".to_string()
+            } else {
+                plugin.capabilities.iter().map(|c| format!("[{}]", c.as_str())).collect::<Vec<_>>().join(" ")
+            };
+
+            let keys_str = if plugin.keybinds.is_empty() {
+                "—".to_string()
+            } else {
+                plugin.keybinds.keys().cloned().collect::<Vec<_>>().join(", ")
+            };
+
+            let row_style = if is_selected {
+                Style::default().bg(theme.selection_bg).fg(theme.selection_fg).add_modifier(Modifier::BOLD)
+            } else if plugin.disabled {
+                Style::default().fg(theme.secondary)
+            } else {
+                Style::default().fg(theme.fg)
+            };
+
+            Row::new(vec![
+                Cell::from(Span::styled(status_str, if is_selected { Style::default().fg(theme.selection_fg).add_modifier(Modifier::BOLD) } else { status_style })),
+                Cell::from(name_cell),
+                Cell::from(plugin.version.clone()),
+                Cell::from(caps_str),
+                Cell::from(keys_str),
+            ]).style(row_style)
+        }).collect();
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(12),
+                Constraint::Length(34),
+                Constraint::Length(8),
+                Constraint::Min(30),
+                Constraint::Length(16),
+            ]
+        )
+        .header(header)
+        .block(table_block);
+
+        frame.render_widget(table, chunks[1]);
+    }
+
+    // 3. Selected Plugin Inspector
+    let inspector_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .title(" ℹ️ Extension Inspector & Permissions ");
+
+    let mut inspector_lines = Vec::new();
+    if let Some(selected) = state.plugins.get(state.extension_manager_selected) {
+        inspector_lines.push(Line::from(vec![
+            Span::styled(" Name:        ", Style::default().fg(theme.secondary)),
+            Span::styled(&selected.name, Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" [{}] v{}", selected.id, selected.version), Style::default().fg(theme.secondary)),
+            Span::styled("   Status: ", Style::default().fg(theme.secondary)),
+            Span::styled(if selected.disabled { "Disabled" } else { "Active" }, if selected.disabled { Style::default().fg(theme.secondary) } else { Style::default().fg(theme.gauge_fill).add_modifier(Modifier::BOLD) }),
+        ]));
+
+        inspector_lines.push(Line::from(vec![
+            Span::styled(" Description: ", Style::default().fg(theme.secondary)),
+            Span::styled(&selected.description, Style::default().fg(theme.fg)),
+        ]));
+
+        let caps_detail = if selected.capabilities.is_empty() {
+            "None (Read-only observer)".to_string()
+        } else {
+            selected.capabilities.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", ")
+        };
+
+        inspector_lines.push(Line::from(vec![
+            Span::styled(" Permissions: ", Style::default().fg(theme.secondary)),
+            Span::styled(caps_detail, Style::default().fg(theme.accent)),
+            Span::styled("   Strikes: ", Style::default().fg(theme.secondary)),
+            Span::styled(format!("{}/3", selected.strikes), if selected.strikes > 0 { Style::default().fg(theme.error) } else { Style::default().fg(theme.gauge_fill) }),
+        ]));
+
+        if !selected.keybinds.is_empty() {
+            let binds = selected.keybinds.iter().map(|(k, v)| format!("{} ➔ {}", k, v)).collect::<Vec<_>>().join("  |  ");
+            inspector_lines.push(Line::from(vec![
+                Span::styled(" Keybindings: ", Style::default().fg(theme.secondary)),
+                Span::styled(binds, Style::default().fg(theme.gauge_fill)),
+            ]));
+        }
+    } else {
+        inspector_lines.push(Line::from(vec![
+            Span::styled("Select a plugin above to view security capabilities, execution metrics, and keybindings.", Style::default().fg(theme.secondary)),
+        ]));
+    }
+
+    inspector_lines.push(Line::from(""));
+    inspector_lines.push(Line::from(vec![
+        Span::styled(" Controls: ", Style::default().fg(theme.secondary)),
+        Span::styled("[↑ / ↓] Select Plugin   ", Style::default().fg(theme.accent)),
+        Span::styled("[Space / Enter] Toggle Active   ", Style::default().fg(theme.gauge_fill).add_modifier(Modifier::BOLD)),
+        Span::styled("[Tab / 1..9] Switch Tabs   ", Style::default().fg(theme.accent)),
+        Span::styled("[Esc] Return to Library", Style::default().fg(theme.secondary)),
+    ]));
+
+    let inspector_para = Paragraph::new(inspector_lines).block(inspector_block);
+    frame.render_widget(inspector_para, chunks[2]);
 }
 
 #[cfg(test)]

@@ -310,20 +310,25 @@ function plugin.on_load()
         if saved.width ~= nil then state.width = saved.width end
     end
 
-    tunotron.log("3D Spatial Audio Studio initialized (Press 2 or Tab to open studio page, Ctrl+S to toggle)")
+    tunotron.log("3D Spatial Audio Studio initialized (Press 3 or Tab to open studio page, Ctrl+S to toggle)")
 
     return {
         {
             action = "RegisterTab",
             id = "spatial_audio",
             title = "3D Spatial",
-            shortcut = "2"
+            shortcut = "3"
         },
         {
             action = "SetExtensionPage",
             page = make_page_table()
         }
     }
+end
+
+function plugin.on_unload()
+    tunotron.state.set("spatial_state", state)
+    tunotron.log("3D Spatial Audio Studio unloaded, state saved")
 end
 
 function plugin.on_action(name, payload)

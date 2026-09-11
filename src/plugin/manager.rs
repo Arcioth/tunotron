@@ -22,6 +22,10 @@ impl PluginManager {
         }
     }
 
+    pub fn contains(&self, id: &str) -> bool {
+        self.plugins.iter().any(|p| p.plugin.manifest().id == id)
+    }
+
     pub fn register(&mut self, mut plugin: Box<dyn Plugin>) -> Result<Vec<ActionEnvelope>, String> {
         let id = plugin.manifest().id.clone();
         if self.plugins.iter().any(|p| p.plugin.manifest().id == id) {
@@ -113,6 +117,38 @@ impl PluginManager {
             .find(|p| p.plugin.manifest().id == id)
             .map(|p| p.disabled)
             .unwrap_or(false)
+    }
+
+    pub fn plugin_infos(&self) -> Vec<crate::app::PluginInfo> {
+        self.plugins
+            .iter()
+            .map(|p| {
+                let manifest = p.plugin.manifest();
+                crate::app::PluginInfo {
+                    id: manifest.id.clone(),
+                    name: manifest.name.clone(),
+                    version: manifest.version.clone(),
+                    description: manifest.description.clone(),
+                    capabilities: manifest.capabilities.clone(),
+                    keybinds: manifest.keybinds.clone(),
+                    disabled: p.disabled,
+                    is_builtin: manifest.id.starts_with("builtin."),
+                    strikes: p.strikes,
+                }
+            })
+            .collect()
+    }
+
+    pub fn toggle_disabled(&mut self, id: &str) -> Option<bool> {
+        let entry = self.plugins.iter_mut().find(|p| p.plugin.manifest().id == id)?;
+        entry.disabled = !entry.disabled;
+        if entry.disabled {
+            entry.plugin.on_unload();
+            entry.plugin.flush_state();
+        } else {
+            let _ = entry.plugin.on_load();
+        }
+        Some(entry.disabled)
     }
 
     /// Broadcasts a domain event to all plugins and enforces capability permissions

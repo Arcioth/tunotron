@@ -27,9 +27,11 @@ pub fn render_app(frame: &mut Frame, state: &AppState, geom: &mut UiGeom, theme:
     // Save hitboxes for mouse clicks
     geom.browser_rect = chunks[1];
 
-    render_header(frame, chunks[0], state, theme);
+    render_header(frame, chunks[0], state, geom, theme);
     if state.active_tab == 0 {
         render_browser_table(frame, chunks[1], state, geom, theme);
+    } else if state.active_tab == 1 && state.tabs.get(1).map(|t| t.id.as_str()) == Some("extensions") {
+        crate::ui::render_extension_manager(frame, chunks[1], state, theme);
     } else if let Some(page) = state.active_extension_page() {
         crate::ui::render_extension_page(frame, chunks[1], page, theme);
     } else {
@@ -80,7 +82,10 @@ pub fn render_app(frame: &mut Frame, state: &AppState, geom: &mut UiGeom, theme:
     }
 }
 
-fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+fn render_header(frame: &mut Frame, area: Rect, state: &AppState, geom: &mut UiGeom, theme: &Theme) {
+    geom.tab_rects.clear();
+    geom.header_rect = area;
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -111,19 +116,37 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
         ));
     }
 
-    if state.tabs.len() > 1 {
-        spans.push(Span::raw(" | Tabs: "));
-        for (idx, tab) in state.tabs.iter().enumerate() {
-            let is_active = idx == state.active_tab;
-            let num = idx + 1;
-            let title_style = if is_active {
-                Style::default().bg(theme.selection_bg).fg(theme.selection_fg).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.secondary)
-            };
-            spans.push(Span::styled(format!("[{}:{}]", num, tab.title), title_style));
-            spans.push(Span::raw(" "));
-        }
+    let mut current_char_x = area.x.saturating_add(1);
+    for s in &spans {
+        current_char_x = current_char_x.saturating_add(s.content.chars().count() as u16);
+    }
+
+    spans.push(Span::raw(" | Tabs: "));
+    current_char_x = current_char_x.saturating_add(9);
+
+    for (idx, tab) in state.tabs.iter().enumerate() {
+        let is_active = idx == state.active_tab;
+        let fallback_num = (idx + 1).to_string();
+        let num = tab.shortcut.as_deref().unwrap_or(&fallback_num);
+        let pill_text = format!("[{}:{}]", num, tab.title);
+        let pill_len = pill_text.chars().count() as u16;
+
+        let pill_rect = Rect {
+            x: current_char_x,
+            y: area.y.saturating_add(1),
+            width: pill_len,
+            height: 1,
+        };
+        geom.tab_rects.push((pill_rect, idx));
+        current_char_x = current_char_x.saturating_add(pill_len + 1);
+
+        let title_style = if is_active {
+            Style::default().bg(theme.selection_bg).fg(theme.selection_fg).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.secondary)
+        };
+        spans.push(Span::styled(pill_text, title_style));
+        spans.push(Span::raw(" "));
     }
 
     let header_line = Line::from(spans);

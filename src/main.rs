@@ -20,7 +20,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use action::{Action, Effect};
+use action::{Action, ActionEnvelope, Effect};
 use app::AppState;
 use audio::{run_mpv_actor, MpvCommand, MpvSupervisor};
 use event::AppEvent;
@@ -123,16 +123,32 @@ async fn main() -> Result<()> {
     let mut plugin_mgr = plugin::PluginManager::new();
     let _ = plugin_mgr.register(Box::new(plugin::TrackLoggerPlugin::new()));
 
-    let plugin_dir = plugin::default_plugin_dir();
-    let (user_plugins_loaded, initial_envelopes) = plugin::load_plugins_from_dir(&plugin_dir, Some(&music_dir), &mut plugin_mgr);
+    let mut plugin_dirs = vec![plugin::default_plugin_dir()];
+    let dev_plugins = PathBuf::from("plugins");
+    if dev_plugins.is_dir() && !plugin_dirs.contains(&dev_plugins) {
+        plugin_dirs.push(dev_plugins);
+    }
+    let examples_plugins = PathBuf::from("examples/plugins");
+    if examples_plugins.is_dir() && !plugin_dirs.contains(&examples_plugins) {
+        plugin_dirs.push(examples_plugins);
+    }
+
+    let mut user_plugins_loaded = 0;
+    let mut initial_envelopes = Vec::new();
+    for pdir in &plugin_dirs {
+        let (count, envs) = plugin::load_plugins_from_dir(pdir, Some(&music_dir), &mut plugin_mgr);
+        user_plugins_loaded += count;
+        initial_envelopes.extend(envs);
+    }
     info!(
-        "Plugins initialized: {} built-in, {} external from {}",
+        "Plugins initialized: {} built-in, {} external from {:?}",
         plugin_mgr.len().saturating_sub(user_plugins_loaded),
         user_plugins_loaded,
-        plugin_dir.display()
+        plugin_dirs
     );
 
     let (mut app, init_effects) = AppState::new(music_dir);
+    app.sync_plugins(plugin_mgr.plugin_infos());
     execute_effects(init_effects, &cmd_tx, &event_tx, &mut plugin_mgr);
     let mut geom = UiGeom::new();
     geom.clamp_selection(app.browser_items.len());
@@ -141,6 +157,7 @@ async fn main() -> Result<()> {
         let effects = app.reduce(env.action, &mut geom);
         execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
     }
+    app.sync_plugins(plugin_mgr.plugin_infos());
 
     let ipc_handle = match ipc::spawn_ipc_server(event_tx.clone(), ipc::TunotronStatus::from_app(&app)) {
         Ok(h) => {
@@ -201,8 +218,30 @@ async fn main() -> Result<()> {
                             continue;
                         }
 
-                        // If an extension page tab is active (and no modal is open), route arrows, enter, space to form controls
-                        if app.active_tab > 0 && !geom.has_window() {
+                        // If Tab 1 (Extensions Manager) is active
+                        if app.active_tab == 1 && !geom.has_window() {
+                            let ext_action = match key.code {
+                                KeyCode::Up | KeyCode::Char('k') => Some(Action::ExtensionNavUp),
+                                KeyCode::Down | KeyCode::Char('j') => Some(Action::ExtensionNavDown),
+                                KeyCode::Enter | KeyCode::Char(' ') => Some(Action::ToggleSelectedPlugin),
+                                KeyCode::Esc => Some(Action::SwitchTab(0)),
+                                KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+                                    let digit_idx = (c as usize).saturating_sub('1' as usize);
+                                    Some(Action::SwitchTab(digit_idx))
+                                }
+                                _ => None,
+                            };
+
+                            if let Some(action) = ext_action {
+                                let effects = app.reduce(action, &mut geom);
+                                execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
+                                should_render = true;
+                                continue;
+                            }
+                        }
+
+                        // If an extension custom page tab is active (Tab >= 2), route arrows, enter, space to form controls
+                        if app.active_tab >= 2 && !geom.has_window() {
                             let form_action = match key.code {
                                 KeyCode::Up => Some(Action::FormNavUp),
                                 KeyCode::Down => Some(Action::FormNavDown),
@@ -222,6 +261,21 @@ async fn main() -> Result<()> {
                                 execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
                                 should_render = true;
                                 continue;
+                            }
+                        }
+
+                        // On Tab 0 (Browser), allow 1..9 to jump directly to tab
+                        if app.active_tab == 0 && !geom.has_window() {
+                            if let KeyCode::Char(c) = key.code {
+                                if c.is_ascii_digit() && c != '0' {
+                                    let digit_idx = (c as usize).saturating_sub('1' as usize);
+                                    if digit_idx < app.tabs.len() {
+                                        let effects = app.reduce(Action::SwitchTab(digit_idx), &mut geom);
+                                        execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
+                                        should_render = true;
+                                        continue;
+                                    }
+                                }
                             }
                         }
 
@@ -255,32 +309,39 @@ async fn main() -> Result<()> {
                                     // Shield background widgets from clicks
                                     continue;
                                 }
-                                if geom.progress_rect.contains(pos) {
+
+                                // 1. Click on Header Tab Pills
+                                if let Some(&(_, tab_idx)) = geom.tab_rects.iter().find(|(r, _)| r.contains(pos)) {
+                                    let effects = app.reduce(Action::SwitchTab(tab_idx), &mut geom);
+                                    execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
+                                    should_render = true;
+                                } else if geom.progress_rect.contains(pos) {
                                     let relative_x = mouse.column.saturating_sub(geom.progress_rect.x) as f64;
                                     let denom = geom.progress_rect.width.max(1).saturating_sub(1).max(1) as f64;
                                     let ratio = (relative_x / denom).clamp(0.0, 1.0);
                                     let effects = app.reduce(Action::SeekRatio(ratio), &mut geom);
                                     execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
                                     should_render = true;
-                                } else if geom.browser_rows_rect.contains(pos) {
+                                } else if app.active_tab == 0 && geom.browser_rows_rect.contains(pos) {
                                     let visual = (mouse.row.saturating_sub(geom.browser_rows_rect.y)) as usize;
                                     let idx = geom.scroll_offset() + visual;
-                                    let now = Instant::now();
-                                    let is_double_click = matches!(
-                                        last_click,
-                                        Some((last_idx, last_time))
-                                            if last_idx == idx
-                                                && now.duration_since(last_time) < Duration::from_millis(400)
-                                    );
-                                    last_click = Some((idx, now));
+                                    if idx < app.browser_items.len() {
+                                        let now = Instant::now();
+                                        let is_double_click = matches!(
+                                            last_click,
+                                            Some((last_idx, last_time))
+                                                if last_idx == idx
+                                                    && now.duration_since(last_time) < Duration::from_millis(500)
+                                        );
+                                        last_click = Some((idx, now));
 
-                                    let effects = if is_double_click {
-                                        app.reduce(Action::PlaySelected, &mut geom)
-                                    } else {
-                                        app.reduce(Action::SelectIndex(idx), &mut geom)
-                                    };
-                                    execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
-                                    should_render = true;
+                                        let mut effects = app.reduce(Action::SelectIndex(idx), &mut geom);
+                                        if is_double_click {
+                                            effects.extend(app.reduce(Action::PlaySelected, &mut geom));
+                                        }
+                                        execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
+                                        should_render = true;
+                                    }
                                 }
                             }
                             _ => {}
@@ -519,6 +580,20 @@ fn execute_effects(
                             tracing::warn!("Failed to dispatch desktop notification: {}", e);
                         }
                     });
+                }
+            }
+            Effect::TogglePlugin(id) => {
+                if let Some(disabled) = plugin_mgr.toggle_disabled(&id) {
+                    let status = if disabled { "disabled" } else { "enabled" };
+                    let _ = event_tx.try_send(AppEvent::Action(ActionEnvelope::internal(
+                        Action::SyncPlugins(plugin_mgr.plugin_infos()),
+                    )));
+                    let _ = event_tx.try_send(AppEvent::Action(ActionEnvelope::internal(
+                        Action::ShowToast {
+                            message: format!("Extension '{}' {}", id, status),
+                            duration_ms: 2000,
+                        },
+                    )));
                 }
             }
         }
