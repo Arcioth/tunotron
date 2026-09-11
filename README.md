@@ -5,10 +5,10 @@
 **A minimal, zero-bloat, rock-solid, extensible terminal music player.**  
 Built with **Rust**, **Ratatui**, and headless **mpv** over asynchronous UNIX sockets.
 
-[![Version](https://img.shields.io/badge/version-v0.3.6-blue?style=for-the-badge)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.3.7-blue?style=for-the-badge)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-success?style=for-the-badge)](LICENSE)
-[![Binary Size](https://img.shields.io/badge/binary%20size-3.6%20MB-purple?style=for-the-badge)](#-performance-benchmarks)
-[![Tests](https://img.shields.io/badge/tests-46%20passed%20%7C%200%20warnings-brightgreen?style=for-the-badge)](#-automated-test-suite)
+[![Binary Size](https://img.shields.io/badge/binary%20size-4.0%20MB-purple?style=for-the-badge)](#-performance-benchmarks)
+[![Tests](https://img.shields.io/badge/tests-66%20passed%20%7C%200%20warnings-brightgreen?style=for-the-badge)](#-automated-test-suite)
 [![Platform](https://img.shields.io/badge/platform-NixOS%20%7C%20Arch%20%7C%20Fedora%20%7C%20CachyOS-informational?style=for-the-badge)](#-quickstart--installation)
 
 </div>
@@ -52,19 +52,48 @@ Following comprehensive systems audits across `v0.2.0` and `v0.3.0`, Tunotron el
 | **Resident Memory (RSS)** | ~25 MB – 29 MB | **~18 MB – 22 MB** | Flat & bounded (10k cache cap) |
 | **Folder Switch Latency (100+ files)** | 150ms – 1,200ms UI freeze (blocking lofty probe) | **< 1ms instantaneous switch** | **150× – 1,000× faster** |
 | **Revisited Folder Metadata Latency** | Full disk rescan / lofty probe | **0.00ms (instant in-memory cache hit)** | **Zero disk I/O** |
-| **Single Binary Size** | 4.5 MB | **3.6 MB** (Fat LTO + embedded Lua 5.4 + stripped symbols) | **20% smaller** |
+| **Single Binary Size** | 4.5 MB | **4.0 MB** (Fat LTO + embedded Lua 5.4 + stripped symbols) | **~15% smaller** |
 
 ---
 
 ## 🧪 Automated Test Suite
 
-Tunotron includes 59 automated unit tests covering security jails, PRNG determinism, playback loop modes, keychord normalization, clock interpolation, metadata caching, background metadata patching, modal window stacks, and the complete 6-pillar Lua plugin system:
+Tunotron includes 66 automated unit and integration tests covering security jails, PRNG determinism, playback loop modes, keychord normalization, clock interpolation, metadata caching, background metadata patching, modal window stacks, the 6-pillar Lua plugin system, and the Unix socket IPC controller:
 
 ```bash
 $ cargo test
-running 59 tests
+running 66 tests
 ...
-test result: ok. 59 passed; 0 failed; 0 ignored; finished in 0.17s
+test result: ok. 66 passed; 0 failed; 0 ignored; finished in 0.17s
+```
+
+---
+
+## 📡 Headless CLI & Outbound IPC Streaming
+
+Tunotron operates as an adaptive audio runtime. Beyond the interactive Ratatui TUI, the single binary acts as a headless command-line controller and hosts an asynchronous Unix domain socket (`$XDG_RUNTIME_DIR/tunotron.sock`):
+
+```bash
+# Instant CLI playback controls (0.0% CPU daemon control)
+$ tunotron play
+$ tunotron pause
+$ tunotron toggle
+$ tunotron next
+$ tunotron prev
+$ tunotron volume +5
+$ tunotron seek +10
+$ tunotron toast "Equalizer: Bass Boost"
+
+# Human-readable status query
+$ tunotron status
+▶ Queen — Bohemian Rhapsody [01:23 / 05:55] (Vol: 85%, Loop: All, Shuffle: Off)
+
+# Native JSON output for Waybar, SwayNC, or Polybar
+$ tunotron status --json
+{"text":"Queen — Bohemian Rhapsody","alt":"playing","tooltip":"Queen — Bohemian Rhapsody\nAlbum: A Night at the Opera\n[01:23 / 05:55]","class":"playing","percentage":23}
+
+# Continuous reactive event stream (zero busy-polling)
+$ tunotron status --json --follow
 ```
 
 ---
@@ -77,6 +106,7 @@ test result: ok. 59 passed; 0 failed; 0 ignored; finished in 0.17s
 | `j` / `↓` / **Mouse Wheel Down** | Move down 1 item (scroll) |
 | `k` / `↑` / **Mouse Wheel Up** | Move up 1 item (scroll) |
 | **Mouse Left Click (Row)** | Select track / directory |
+| **Mouse Double-Click (Row)** | **Play track immediately or enter directory** |
 | `g g` | Jump to top of directory |
 | `G` | Jump to bottom of directory |
 | `.` | **Locate currently playing track** (jumps to its directory and focuses it) |
