@@ -9,7 +9,7 @@ mod terminal;
 mod ui;
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{Event as CrosstermEvent, EventStream, KeyEventKind, MouseButton, MouseEventKind};
 use futures_util::StreamExt;
@@ -131,6 +131,7 @@ async fn main() -> Result<()> {
     // Initial draw
     terminal.draw(|f| render_app(f, &app, &mut geom, &theme))?;
     let mut should_render = false;
+    let mut last_click: Option<(usize, Instant)> = None;
 
     // 8. Central Reactive Event Loop (Zero CPU when idle)
     while app.is_running {
@@ -184,7 +185,20 @@ async fn main() -> Result<()> {
                                 } else if geom.browser_rows_rect.contains(pos) {
                                     let visual = (mouse.row.saturating_sub(geom.browser_rows_rect.y)) as usize;
                                     let idx = geom.scroll_offset() + visual;
-                                    let effects = app.reduce(Action::SelectIndex(idx), &mut geom);
+                                    let now = Instant::now();
+                                    let is_double_click = matches!(
+                                        last_click,
+                                        Some((last_idx, last_time))
+                                            if last_idx == idx
+                                                && now.duration_since(last_time) < Duration::from_millis(400)
+                                    );
+                                    last_click = Some((idx, now));
+
+                                    let effects = if is_double_click {
+                                        app.reduce(Action::PlaySelected, &mut geom)
+                                    } else {
+                                        app.reduce(Action::SelectIndex(idx), &mut geom)
+                                    };
                                     execute_effects(effects, &cmd_tx, &event_tx, &mut plugin_mgr);
                                     should_render = true;
                                 }
