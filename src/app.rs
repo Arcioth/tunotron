@@ -188,6 +188,8 @@ pub struct AppState {
     pub browser_title: String,
     pub metadata_cache: LruCache<PathBuf, crate::event::MetadataPatch>,
     pub density: ViewDensity,
+    pub active_toast: Option<(String, Instant, std::time::Duration)>,
+    pub slots: std::collections::HashMap<String, String>,
 }
 
 impl AppState {
@@ -212,12 +214,43 @@ impl AppState {
             browser_title: " Music Browser (0 items) ".to_string(),
             metadata_cache: LruCache::new(Self::METADATA_CACHE_CAP),
             density: ViewDensity::Comfortable,
+            active_toast: None,
+            slots: std::collections::HashMap::new(),
         };
 
         let initial_items = read_directory(&canonical_root, &canonical_root);
         let effects = state.set_browser_items(initial_items);
 
         (state, effects)
+    }
+
+    pub fn set_toast(&mut self, message: String, duration_ms: u64) {
+        self.active_toast = Some((
+            message,
+            Instant::now(),
+            std::time::Duration::from_millis(duration_ms.max(500)),
+        ));
+    }
+
+    pub fn toast_message(&self) -> Option<&str> {
+        if let Some((msg, instant, duration)) = &self.active_toast {
+            if instant.elapsed() < *duration {
+                return Some(msg.as_str());
+            }
+        }
+        None
+    }
+
+    pub fn set_slot(&mut self, slot: String, content: String) {
+        if content.is_empty() {
+            self.slots.remove(&slot);
+        } else {
+            self.slots.insert(slot, content);
+        }
+    }
+
+    pub fn clear_slot(&mut self, slot: &str) {
+        self.slots.remove(slot);
     }
 
     pub fn is_playing(&self) -> bool {
@@ -372,6 +405,21 @@ impl AppState {
                     geom.open_modal(title, content);
                     return Vec::new();
                 }
+                Action::ShowToast { message, duration_ms } => {
+                    self.set_toast(message, duration_ms);
+                    return Vec::new();
+                }
+                Action::SetSlot { slot, content } => {
+                    self.set_slot(slot, content);
+                    return Vec::new();
+                }
+                Action::ClearSlot { slot } => {
+                    self.clear_slot(&slot);
+                    return Vec::new();
+                }
+                Action::Broadcast { event, payload } => {
+                    return vec![Effect::Broadcast { event, payload }];
+                }
                 Action::Notify { summary, body } => {
                     return vec![Effect::Notify { summary, body }];
                 }
@@ -398,6 +446,18 @@ impl AppState {
             }
             Action::ShowModal { title, content } => {
                 geom.open_modal(title, content);
+                Vec::new()
+            }
+            Action::ShowToast { message, duration_ms } => {
+                self.set_toast(message, duration_ms);
+                Vec::new()
+            }
+            Action::SetSlot { slot, content } => {
+                self.set_slot(slot, content);
+                Vec::new()
+            }
+            Action::ClearSlot { slot } => {
+                self.clear_slot(&slot);
                 Vec::new()
             }
             Action::CloseTopWindow => {
@@ -498,6 +558,16 @@ impl AppState {
                     relative: false,
                 })]
             }
+            Action::SeekAbsolute(target_sec) => {
+                let clamped = target_sec.clamp(0.0, self.playback.duration_sec.max(0.0));
+                self.clock.sync(clamped);
+                self.playback.current_time_sec = clamped;
+                self.playback.update_time_label(clamped);
+                vec![Effect::Mpv(MpvCommand::Seek {
+                    seconds: clamped,
+                    relative: false,
+                })]
+            }
             Action::VolumeDelta(delta_pct) => {
                 let new_vol = (self.playback.volume + delta_pct as f64).clamp(0.0, 100.0);
                 self.playback.volume = new_vol;
@@ -509,6 +579,9 @@ impl AppState {
                 self.playback.volume = clamped;
                 self.playback.update_vol_label();
                 vec![Effect::Mpv(MpvCommand::SetVolume(clamped))]
+            }
+            Action::SetAudioFilter(filter) => {
+                vec![Effect::Mpv(MpvCommand::SetAudioFilter(filter))]
             }
             Action::CycleLoopMode => {
                 self.playback.loop_mode = self.playback.loop_mode.next();
@@ -554,6 +627,10 @@ impl AppState {
             Action::Plugin { plugin_id, name, payload } => {
                 tracing::debug!("Received plugin action: [{}] {} {:?}", plugin_id, name, payload);
                 vec![Effect::PluginAction { plugin_id, name, payload }]
+            }
+
+            Action::Broadcast { event, payload } => {
+                vec![Effect::Broadcast { event, payload }]
             }
 
             Action::Notify { summary, body } => {
@@ -1129,6 +1206,95 @@ mod tests {
             vec![Effect::Notify {
                 summary: "Title".to_string(),
                 body: "Body text".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_seek_absolute_reducer() {
+        let (mut app, _) = AppState::new(std::env::temp_dir());
+        let mut geom = UiGeom::default();
+        app.playback.duration_sec = 300.0;
+
+        let effects = app.reduce(Action::SeekAbsolute(142.5), &mut geom);
+        assert_eq!(
+            effects,
+            vec![Effect::Mpv(MpvCommand::Seek {
+                seconds: 142.5,
+                relative: false,
+            })]
+        );
+        assert_eq!(app.playback.current_time_sec, 142.5);
+    }
+
+    #[test]
+    fn test_set_audio_filter_reducer() {
+        let (mut app, _) = AppState::new(std::env::temp_dir());
+        let mut geom = UiGeom::default();
+
+        let effects = app.reduce(Action::SetAudioFilter("lavfi=[loudnorm]".to_string()), &mut geom);
+        assert_eq!(
+            effects,
+            vec![Effect::Mpv(MpvCommand::SetAudioFilter("lavfi=[loudnorm]".to_string()))]
+        );
+    }
+
+    #[test]
+    fn test_show_toast_and_slot_reducer() {
+        let (mut app, _) = AppState::new(std::env::temp_dir());
+        let mut geom = UiGeom::default();
+
+        assert_eq!(app.toast_message(), None);
+        let effects = app.reduce(
+            Action::ShowToast {
+                message: "Timer set for 15m".to_string(),
+                duration_ms: 3000,
+            },
+            &mut geom,
+        );
+        assert!(effects.is_empty());
+        assert_eq!(app.toast_message(), Some("Timer set for 15m"));
+
+        // Slot set and clear
+        assert!(!app.slots.contains_key("topbar"));
+        let effects = app.reduce(
+            Action::SetSlot {
+                slot: "topbar".to_string(),
+                content: "[Timer: 15m]".to_string(),
+            },
+            &mut geom,
+        );
+        assert!(effects.is_empty());
+        assert_eq!(app.slots.get("topbar").map(|s| s.as_str()), Some("[Timer: 15m]"));
+
+        let effects = app.reduce(
+            Action::ClearSlot {
+                slot: "topbar".to_string(),
+            },
+            &mut geom,
+        );
+        assert!(effects.is_empty());
+        assert_eq!(app.slots.get("topbar"), None);
+    }
+
+    #[test]
+    fn test_broadcast_event_reducer() {
+        let (mut app, _) = AppState::new(std::env::temp_dir());
+        let mut geom = UiGeom::default();
+
+        let payload = serde_json::json!({ "tempo": 128 });
+        let effects = app.reduce(
+            Action::Broadcast {
+                event: "tempo:detected".to_string(),
+                payload: payload.clone(),
+            },
+            &mut geom,
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::Broadcast {
+                event: "tempo:detected".to_string(),
+                payload,
             }]
         );
     }

@@ -602,6 +602,10 @@ fn parse_table_action(tbl: &Table) -> Option<Action> {
             let ratio: f64 = tbl.get("ratio").unwrap_or(0.0);
             Some(Action::SeekRatio(ratio))
         }
+        "SeekAbsolute" => {
+            let seconds: f64 = tbl.get("seconds").unwrap_or(0.0);
+            Some(Action::SeekAbsolute(seconds))
+        }
         "VolumeDelta" => {
             let delta: i8 = tbl.get("delta").unwrap_or(0);
             Some(Action::VolumeDelta(delta))
@@ -609,6 +613,30 @@ fn parse_table_action(tbl: &Table) -> Option<Action> {
         "SetVolume" => {
             let volume: f64 = tbl.get("volume").unwrap_or(100.0);
             Some(Action::SetVolume(volume))
+        }
+        "SetAudioFilter" => {
+            let filter: String = tbl.get("filter").unwrap_or_default();
+            Some(Action::SetAudioFilter(filter))
+        }
+        "ShowToast" => {
+            let message: String = tbl.get("message").unwrap_or_default();
+            let duration_ms: u64 = tbl.get("duration_ms").unwrap_or(2000);
+            Some(Action::ShowToast { message, duration_ms })
+        }
+        "SetSlot" => {
+            let slot: String = tbl.get("slot").ok()?;
+            let content: String = tbl.get("content").unwrap_or_default();
+            Some(Action::SetSlot { slot, content })
+        }
+        "ClearSlot" => {
+            let slot: String = tbl.get("slot").ok()?;
+            Some(Action::ClearSlot { slot })
+        }
+        "Broadcast" => {
+            let event: String = tbl.get("event").ok()?;
+            let payload_val: Value = tbl.get("payload").unwrap_or(Value::Nil);
+            let payload: serde_json::Value = serde_json::to_value(&payload_val).unwrap_or(serde_json::Value::Null);
+            Some(Action::Broadcast { event, payload })
         }
         "PlayTrackIndex" => {
             let index: usize = tbl.get("index").unwrap_or(0);
@@ -1441,5 +1469,48 @@ mod tests {
         assert_eq!(actions, vec![Action::ToggleHelp], "Functions/userdata must be rejected by serializer");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_lua_plugin_emits_precision_actions_and_slots() {
+        let script = r#"
+            local p = {}
+            p.manifest = {
+                id = "org.tunotron.hookstest",
+                capabilities = { "PlaybackControl", "UiOverlay" }
+            }
+            function p.on_action(name, payload)
+                return {
+                    { action = "SeekAbsolute", seconds = 65.5 },
+                    { action = "SetAudioFilter", filter = "lavfi=[loudnorm]" },
+                    { action = "ShowToast", message = "Filter applied", duration_ms = 1500 },
+                    { action = "SetSlot", slot = "topbar", content = "[Bass Boost]" },
+                    { action = "Broadcast", event = "eq:preset_changed", payload = { preset = "bass" } },
+                }
+            end
+            return p
+        "#;
+
+        let mut plugin = LuaPlugin::from_script(script, "hooks.lua").unwrap();
+        let actions = plugin.on_action("trigger", &serde_json::json!({}));
+        assert_eq!(
+            actions,
+            vec![
+                Action::SeekAbsolute(65.5),
+                Action::SetAudioFilter("lavfi=[loudnorm]".to_string()),
+                Action::ShowToast {
+                    message: "Filter applied".to_string(),
+                    duration_ms: 1500,
+                },
+                Action::SetSlot {
+                    slot: "topbar".to_string(),
+                    content: "[Bass Boost]".to_string(),
+                },
+                Action::Broadcast {
+                    event: "eq:preset_changed".to_string(),
+                    payload: serde_json::json!({ "preset": "bass" }),
+                },
+            ]
+        );
     }
 }

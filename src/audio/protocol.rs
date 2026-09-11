@@ -57,6 +57,7 @@ pub enum MpvCommand {
     SetPause(bool),
     Seek { seconds: f64, relative: bool },
     SetVolume(f64),
+    SetAudioFilter(String),
     Stop,
     Quit,
     GetTimePos,
@@ -97,6 +98,19 @@ impl MpvCommand {
                 command: vec!["set_property".into(), "volume".into(), (*vol).into()],
                 request_id: req_id,
             },
+            MpvCommand::SetAudioFilter(filter) => {
+                if filter.is_empty() {
+                    MpvRequest {
+                        command: vec!["af".into(), "clr".into()],
+                        request_id: req_id,
+                    }
+                } else {
+                    MpvRequest {
+                        command: vec!["af".into(), "set".into(), filter.clone().into()],
+                        request_id: req_id,
+                    }
+                }
+            }
             MpvCommand::Stop => MpvRequest {
                 command: vec!["stop".into()],
                 request_id: req_id,

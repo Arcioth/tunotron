@@ -48,6 +48,30 @@ pub fn render_app(frame: &mut Frame, state: &AppState, geom: &mut UiGeom, theme:
     } else {
         geom.modal_rect = Rect::default();
     }
+
+    // In-App Floating Toast Notification Layer
+    if let Some(toast) = state.toast_message() {
+        let toast_len = toast.chars().count() as u16;
+        let toast_w = (toast_len + 6).min(size.width.saturating_sub(4)).max(24);
+        let toast_h = 3;
+        let toast_x = size.width.saturating_sub(toast_w + 2);
+        let toast_y = size.height.saturating_sub(toast_h + 4);
+        let toast_rect = Rect {
+            x: toast_x,
+            y: toast_y,
+            width: toast_w,
+            height: toast_h,
+        };
+
+        frame.render_widget(ratatui::widgets::Clear, toast_rect);
+        let toast_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme.gauge_fill).add_modifier(Modifier::BOLD))
+            .title(" 🔔 Notification ");
+        let toast_para = Paragraph::new(format!(" {}", toast)).block(toast_block);
+        frame.render_widget(toast_para, toast_rect);
+    }
 }
 
 fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
@@ -63,7 +87,7 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
         ViewDensity::Compact => "[Z: Compact] ",
     };
 
-    let header_line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(" Folder: ", Style::default().fg(theme.secondary)),
         Span::styled(current_path_str, Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)),
         Span::raw("   "),
@@ -72,7 +96,16 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
         Span::styled(density_label, Style::default().fg(theme.accent)),
         Span::styled("[m: Loop] ", Style::default().fg(theme.accent)),
         Span::styled("[s: Shuffle]", Style::default().fg(theme.accent)),
-    ]);
+    ];
+
+    if let Some(topbar_slot) = state.slots.get("topbar") {
+        spans.push(Span::styled(
+            format!(" | {}", topbar_slot),
+            Style::default().fg(theme.gauge_fill).add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    let header_line = Line::from(spans);
 
     let paragraph = Paragraph::new(header_line).block(block);
     frame.render_widget(paragraph, area);
@@ -219,7 +252,7 @@ fn render_player_bar(frame: &mut Frame, area: Rect, state: &AppState, geom: &mut
     let loop_mode_str = state.playback.loop_mode.badge_str();
     let shuffle_str = state.playback.shuffle_mode.badge_str();
 
-    let row1 = Line::from(vec![
+    let mut row1_spans = vec![
         status_icon,
         Span::raw(" "),
         Span::styled(
@@ -232,7 +265,17 @@ fn render_player_bar(frame: &mut Frame, area: Rect, state: &AppState, geom: &mut
         Span::styled(shuffle_str, Style::default().fg(theme.accent)),
         Span::raw(" | "),
         Span::styled(state.playback.vol_label.as_str(), Style::default().fg(theme.secondary)),
-    ]);
+    ];
+
+    if let Some(extra) = state.slots.get("player_extra") {
+        row1_spans.push(Span::raw(" | "));
+        row1_spans.push(Span::styled(
+            extra.as_str(),
+            Style::default().fg(theme.gauge_fill).add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    let row1 = Line::from(row1_spans);
 
     frame.render_widget(Paragraph::new(row1), sub_chunks[0]);
 

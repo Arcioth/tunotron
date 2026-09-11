@@ -7,6 +7,7 @@ mod library;
 mod plugin;
 mod terminal;
 mod ui;
+mod ipc;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -29,16 +30,37 @@ use ui::{render_app, Theme, UiGeom};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 0. Quick CLI flags (--version, --help)
-    if let Some(arg) = std::env::args().nth(1) {
-        if arg == "--version" || arg == "-V" {
+    // 0. Quick CLI flags (--version, --help) and CLI controller subcommands
+    let cli_args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(first) = cli_args.first() {
+        if first == "--version" || first == "-V" {
             println!("tunotron {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
-        if arg == "--help" || arg == "-h" {
-            println!("Tunotron v{} - Minimal, zero-bloat TUI music player", env!("CARGO_PKG_VERSION"));
-            println!("Usage: tunotron [MUSIC_DIRECTORY]");
+        if first == "--help" || first == "-h" {
+            println!("Tunotron v{} - Minimal, zero-bloat TUI music player & audio runtime", env!("CARGO_PKG_VERSION"));
+            println!("\nUsage:");
+            println!("  tunotron [MUSIC_DIRECTORY]         Launch interactive TUI player");
+            println!("  tunotron status [--json] [--follow] Query playback status (Waybar/SwayNC ready)");
+            println!("  tunotron play | pause | toggle     Control playback");
+            println!("  tunotron next | prev | stop        Navigate playlist");
+            println!("  tunotron volume <[+|-]percent>     Adjust or set volume (e.g. +5, 80)");
+            println!("  tunotron seek <[+|-]seconds>       Seek relative or absolute (e.g. +10, 45)");
+            println!("  tunotron loop | shuffle            Toggle loop mode or shuffle");
+            println!("  tunotron toast <message>           Display in-app toast notification");
             return Ok(());
+        }
+
+        match first.as_str() {
+            "status" | "play" | "pause" | "toggle" | "stop" | "next" | "prev" | "seek" | "volume" | "loop" | "shuffle" | "toast" => {
+                let sub_args = &cli_args[1..];
+                if let Err(e) = ipc::run_cli_command(first, sub_args).await {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
+            _ => {}
         }
     }
 
@@ -115,6 +137,17 @@ async fn main() -> Result<()> {
     let mut geom = UiGeom::new();
     geom.clamp_selection(app.browser_items.len());
 
+    let ipc_handle = match ipc::spawn_ipc_server(event_tx.clone(), ipc::TunotronStatus::from_app(&app)) {
+        Ok(h) => {
+            info!("IPC socket listener active at {}", h.socket_path.display());
+            Some(h)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to start IPC Unix socket: {}", e);
+            None
+        }
+    };
+
     let mut keymap = KeyMap::default();
     keymap.register_plugin_bindings(&plugin_mgr);
     let mut key_state_machine = KeySequenceStateMachine::new();
@@ -137,6 +170,9 @@ async fn main() -> Result<()> {
     while app.is_running {
         if should_render {
             terminal.draw(|f| render_app(f, &app, &mut geom, &theme))?;
+            if let Some(ipc) = &ipc_handle {
+                ipc.update_status(ipc::TunotronStatus::from_app(&app));
+            }
             should_render = false;
         }
 
@@ -393,6 +429,19 @@ fn execute_effects(
                 for env in envelopes {
                     if let Err(e) = event_tx.try_send(AppEvent::Action(env)) {
                         tracing::warn!("Domain event channel full, plugin action dropped: {}", e);
+                    }
+                }
+            }
+            Effect::Broadcast { event, payload } => {
+                let ev = plugin::PluginEvent::Custom {
+                    source: "host".to_string(),
+                    name: event,
+                    payload,
+                };
+                let envelopes = plugin_mgr.dispatch_event(&ev);
+                for env in envelopes {
+                    if let Err(e) = event_tx.try_send(AppEvent::Action(env)) {
+                        tracing::warn!("Domain event channel full, broadcast action dropped: {}", e);
                     }
                 }
             }

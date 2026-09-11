@@ -27,6 +27,11 @@ pub enum PluginEvent {
         position: f64,
         duration: f64,
     },
+    Custom {
+        source: String,
+        name: String,
+        payload: serde_json::Value,
+    },
 }
 
 pub trait Plugin: Send {

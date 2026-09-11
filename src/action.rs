@@ -18,6 +18,10 @@ pub enum Effect {
         summary: String,
         body: String,
     },
+    Broadcast {
+        event: String,
+        payload: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -107,8 +111,10 @@ pub enum Action {
     PrevTrack,
     Seek(i64),         // delta in seconds (+5, -5)
     SeekRatio(f64),    // 0.0 to 1.0 (from mouse click on seekbar)
+    SeekAbsolute(f64), // absolute position in seconds
     VolumeDelta(i8),   // delta in percent (+5, -5)
     SetVolume(f64),
+    SetAudioFilter(String), // mpv audio filter (e.g. lavfi, equalizer)
     CycleLoopMode,
     ToggleShuffle,
 
@@ -128,6 +134,17 @@ pub enum Action {
         title: String,
         content: String,
     },
+    ShowToast {
+        message: String,
+        duration_ms: u64,
+    },
+    SetSlot {
+        slot: String,
+        content: String,
+    },
+    ClearSlot {
+        slot: String,
+    },
 
     // Dynamic Extension Actions
     Plugin {
@@ -140,6 +157,10 @@ pub enum Action {
     Notify {
         summary: String,
         body: String,
+    },
+    Broadcast {
+        event: String,
+        payload: serde_json::Value,
     },
 
     // Application
@@ -207,8 +228,10 @@ impl Action {
             | Action::PrevTrack
             | Action::Seek(_)
             | Action::SeekRatio(_)
+            | Action::SeekAbsolute(_)
             | Action::VolumeDelta(_)
             | Action::SetVolume(_)
+            | Action::SetAudioFilter(_)
             | Action::CycleLoopMode
             | Action::ToggleShuffle => ActionPermission::Capability(Capability::PlaybackControl),
 
@@ -224,7 +247,10 @@ impl Action {
             | Action::OpenWindow(_)
             | Action::CloseTopWindow
             | Action::ToggleDensity
-            | Action::ShowModal { .. } => ActionPermission::Capability(Capability::UiOverlay),
+            | Action::ShowModal { .. }
+            | Action::ShowToast { .. }
+            | Action::SetSlot { .. }
+            | Action::ClearSlot { .. } => ActionPermission::Capability(Capability::UiOverlay),
 
             Action::Notify { .. } => ActionPermission::Capability(Capability::Notify),
 
@@ -237,6 +263,8 @@ impl Action {
             | Action::SelectIndex(_) => ActionPermission::Public,
 
             Action::Plugin { .. } => ActionPermission::Public,
+
+            Action::Broadcast { .. } => ActionPermission::Public,
 
             Action::Quit => ActionPermission::HostOnly,
         }
