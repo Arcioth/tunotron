@@ -58,35 +58,13 @@ Following comprehensive systems audits across `v0.2.0` and `v0.3.0`, Tunotron el
 
 ## 🧪 Automated Test Suite
 
-Tunotron includes 46 automated unit tests covering security jails, PRNG determinism, playback loop modes, keychord normalization, clock interpolation, metadata caching, background metadata patching, modal window stacks, and the complete 5-pillar Lua plugin system:
+Tunotron includes 59 automated unit tests covering security jails, PRNG determinism, playback loop modes, keychord normalization, clock interpolation, metadata caching, background metadata patching, modal window stacks, and the complete 6-pillar Lua plugin system:
 
 ```bash
 $ cargo test
-running 46 tests
-test action::tests::test_action_permissions_default_deny ... ok
-test action::tests::test_show_modal_capability_permission ... ok
-test action::tests::test_notify_capability_permission ... ok
-test app::tests::test_apply_metadata_patches ... ok
-test app::tests::test_advance_track_loop_modes ... ok
-test app::tests::test_metadata_cache_instant_load ... ok
-test app::tests::test_pure_reducer_effects ... ok
-test app::tests::test_show_modal_reducer ... ok
-test app::tests::test_notify_reducer_effects ... ok
-test keymap::tests::test_key_chord_parse_sequence ... ok
-test keymap::tests::test_key_chords_and_prefix_retry ... ok
-test keymap::tests::test_plugin_keybinding_registration_and_dispatch ... ok
-test library::browser::tests::test_resolve_in_jail ... ok
-test plugin::lua::tests::test_lua_plugin_load_and_manifest ... ok
-test plugin::lua::tests::test_lua_plugin_sandbox_restricts_os_exit ... ok
-test plugin::lua::tests::test_lua_plugin_memory_limit ... ok
-test plugin::lua::tests::test_lua_plugin_jailed_file_read_blocks_path_escape ... ok
-test plugin::lua::tests::test_lua_plugin_emits_show_modal ... ok
-test plugin::lua::tests::test_lua_plugin_on_tick_hook ... ok
-test plugin::lua::tests::test_lyrics_viewer_example_plugin ... ok
-test plugin::lua::tests::test_sleep_timer_example_plugin ... ok
-test plugin::lua::tests::test_now_playing_notify_example_plugin ... ok
+running 59 tests
 ...
-test result: ok. 46 passed; 0 failed; 0 ignored; finished in 0.08s
+test result: ok. 59 passed; 0 failed; 0 ignored; finished in 0.17s
 ```
 
 ---
@@ -173,17 +151,18 @@ Tunotron features a sandboxed, low-overhead **Lua 5.4** runtime (`mlua`) operati
 - **Sandboxed Environment:** Dangerous globals (`os.exit`, `os.execute`, `io`, `package.loadlib`, `debug`) are completely stripped.
 - **0.0% Idle CPU:** Heartbeat hooks (`on_tick`) fire only while audio is actively playing, leaving CPU usage at 0.0% when paused or stopped.
 
-### 🏛️ The 5 Core Extension Pillars
+### 🏛️ The 6 Core Extension Pillars
 1. **Custom Keybindings (`Capability::KeyBind`):** Plugins declare custom single keys, combos (`"ctrl+y"`), or sequences (`"g g"`) in their manifest. Critical host navigation keys (`q`, `Esc`, arrows, `Enter`) are shielded against hijacking.
 2. **Declarative Modals (`Capability::UiOverlay`):** Emit `{ action = "ShowModal", title = "...", content = "..." }` to project rounded, wrapped floating popup dialogs with click-outside and `Esc` dismissal.
 3. **Safe Jailed File Reading (`Capability::FsJailRead`):** Use `tunotron.read_file(path)` and `tunotron.file_exists(path)` with lexical and canonical jail checks to safely read local `.lrc` lyrics and text companion files without escaping the music library.
 4. **Monotonic Playback Heartbeat (`on_tick`):** Implement `function plugin.on_tick(pos, dur)` or `event.type == "Tick"` to receive exact 1 Hz integer-second cadence updates synchronized to the monotonic clock.
 5. **Desktop Notifications (`Capability::Notify`):** Call `tunotron.notify(summary, body)` or return `{ action = "Notify", ... }` for async, non-blocking desktop notifications dispatched via system `notify-send`.
+6. **Persistent State Storage (`Capability::PersistentStorage`):** Namespaced JSON state persistence via `tunotron.state.get(key, default)`, `set(key, val)`, `del(key)`, and `save()`. Backed by an in-memory cache with atomic file sync to `$XDG_DATA_HOME/tunotron/plugins/<id>/state.json` and a 256 KB quota ceiling.
 
 ### 📁 Included Reference Plugins
 Check [`examples/plugins/`](examples/plugins/) for fully tested reference implementations:
-- **[`lyrics_viewer.lua`](examples/plugins/lyrics_viewer.lua):** Press `y` to read companion `.lrc` or `.txt` lyrics and display them in a floating modal.
-- **[`sleep_timer.lua`](examples/plugins/sleep_timer.lua):** Press `Z` to start a 15-minute countdown timer that automatically pauses audio on expiration.
+- **[`lyrics_viewer.lua`](examples/plugins/lyrics_viewer.lua):** Press `L` to read companion `.lrc` or `.txt` lyrics and display them in a floating modal.
+- **[`sleep_timer.lua`](examples/plugins/sleep_timer.lua):** Press `T` to start a configurable countdown timer (with persistent duration settings via Pillar 6) that automatically pauses audio on expiration.
 - **[`now_playing_notify.lua`](examples/plugins/now_playing_notify.lua):** Dispatches native desktop notifications on track changes and supports on-demand notifications via `N`.
 
 ---
@@ -192,7 +171,7 @@ Check [`examples/plugins/`](examples/plugins/) for fully tested reference implem
 
 - [x] **Phase 1:** High-performance core, 0.0% idle CPU, zero-copy tables, canonical security jail, unit test suite (`v0.1` - `v0.2`).
 - [x] **Phase 2:** Pure Action Reducer pattern, `PlaybackClock` monotonic interpolation, and layered Window Stack Compositor (`v0.3.0`).
-- [x] **Phase 3:** Sandboxed Lua 5.4 extension engine with 5 capability pillars: custom keybindings, floating modals, safe jailed file reading, 1 Hz monotonic heartbeat, and desktop notifications (`v0.3.5` - `v0.3.6`).
+- [x] **Phase 3:** Sandboxed Lua 5.4 extension engine with all 6 capability pillars: custom keybindings, floating modals, safe jailed file reading, 1 Hz monotonic heartbeat, desktop notifications, and persistent state storage (`v0.3.5` - `v0.3.7`).
 - [ ] **Phase 4:** Official distribution packages (Nix Flake, AUR PKGBUILD, Fedora RPM, Homebrew).
 
 See [`NEXT_STEPS_PLAN.md`](NEXT_STEPS_PLAN.md) for the complete engineering architecture and design specification.

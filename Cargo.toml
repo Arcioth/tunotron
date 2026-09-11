@@ -40,7 +40,7 @@ anyhow = "1.0"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-strip = "symbols"
+strip = true
 
 [profile.dev.package."*"]
 opt-level = 2

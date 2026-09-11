@@ -10,7 +10,8 @@ plugin.manifest = {
     description = "Automatically pauses playback after a configurable countdown timer",
     capabilities = {
         "KeyBind",
-        "UiOverlay"
+        "UiOverlay",
+        "PersistentStorage"
     },
     keybinds = {
         ["T"] = "toggle_timer"
@@ -22,21 +23,23 @@ local DEFAULT_DURATION_SEC = 15 * 60
 plugin.remaining_sec = nil
 
 function plugin.on_load()
-    tunotron.log("Sleep Timer plugin loaded. Press 'T' to start/cancel a 15-minute sleep timer.")
+    local saved_duration = tunotron.state.get("duration_sec", DEFAULT_DURATION_SEC)
+    tunotron.log(string.format("Sleep Timer plugin loaded. Press 'T' to start/cancel a %d-minute sleep timer.", math.floor(saved_duration / 60)))
 end
 
 function plugin.on_action(name, payload)
     if name == "toggle_timer" then
         if plugin.remaining_sec == nil then
-            plugin.remaining_sec = DEFAULT_DURATION_SEC
-            local mins = math.floor(DEFAULT_DURATION_SEC / 60)
+            local duration = tunotron.state.get("duration_sec", DEFAULT_DURATION_SEC)
+            plugin.remaining_sec = duration
+            local mins = math.floor(duration / 60)
             return {
                 action = "ShowModal",
                 title = "Sleep Timer Activated",
                 content = string.format(
-                    "Playback will automatically pause in %d minutes (%d seconds).\n\nPress 'Z' again at any time to cancel.",
+                    "Playback will automatically pause in %d minutes (%d seconds).\n\nPress 'T' again at any time to cancel.",
                     mins,
-                    DEFAULT_DURATION_SEC
+                    duration
                 )
             }
         else

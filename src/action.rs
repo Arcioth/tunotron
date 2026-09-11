@@ -155,6 +155,7 @@ pub enum Capability {
     FsJailWrite,
     KeyBind,
     Notify,
+    PersistentStorage,
 }
 
 impl std::str::FromStr for Capability {
@@ -169,6 +170,7 @@ impl std::str::FromStr for Capability {
             "FsJailWrite" => Ok(Capability::FsJailWrite),
             "KeyBind" => Ok(Capability::KeyBind),
             "Notify" => Ok(Capability::Notify),
+            "PersistentStorage" => Ok(Capability::PersistentStorage),
             other => Err(format!("Unknown capability: {}", other)),
         }
     }
@@ -184,6 +186,7 @@ impl Capability {
             Capability::FsJailWrite => "FsJailWrite",
             Capability::KeyBind => "KeyBind",
             Capability::Notify => "Notify",
+            Capability::PersistentStorage => "PersistentStorage",
         }
     }
 }

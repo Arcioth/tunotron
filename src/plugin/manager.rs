@@ -62,10 +62,18 @@ impl PluginManager {
         if let Some(pos) = self.plugins.iter().position(|p| p.plugin.manifest().id == id) {
             let mut managed = self.plugins.remove(pos);
             managed.plugin.on_unload();
+            managed.plugin.flush_state();
             tracing::info!("Unregistered plugin: [{}]", id);
             true
         } else {
             false
+        }
+    }
+
+    pub fn unload_all(&mut self) {
+        for managed in &mut self.plugins {
+            managed.plugin.on_unload();
+            managed.plugin.flush_state();
         }
     }
 

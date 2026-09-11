@@ -37,6 +37,13 @@ This release hardens the plugin sandbox against CPU starvation attacks, prevents
   - Enforced 1000ms minimum cooldown between desktop notifications and truncated summaries (128 chars) and bodies (512 chars) to prevent process flood.
 - **API Version Compatibility Enforcement ([`src/plugin/manager.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/manager.rs)):**
   - Added compatibility check rejecting plugins requesting unsupported major API versions.
+- **💾 Pillar 6: Persistent Plugin State Storage (`Capability::PersistentStorage`) ([`src/plugin/storage.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/storage.rs), [`src/plugin/lua.rs`](file:///home/arcioth/Documents/tunotron/src/plugin/lua.rs)):**
+  - Added namespaced JSON persistence at `$XDG_DATA_HOME/tunotron/plugins/<plugin_id>/state.json`.
+  - In-memory cache for zero-latency synchronous reads and writes: `tunotron.state.get(key, default)`, `set(key, val)`, `del(key)`, `all()`, and `save()`.
+  - Strict 256 KB per-plugin quota ceiling preventing disk exhaustion.
+  - Type-safe serialization: mlua serde bridge strictly disallows non-JSON data types (functions, coroutines, userdata).
+  - Atomic persistence via temporary file creation and atomic rename.
+  - Graceful flush on plugin unload (`on_unload`) and application exit (`PluginManager::unload_all`).
 
 ---
 

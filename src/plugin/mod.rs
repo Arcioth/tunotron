@@ -5,6 +5,7 @@ pub mod loader;
 pub mod lua;
 pub mod manifest;
 pub mod manager;
+pub mod storage;
 pub mod traits;
 
 pub use builtin::TrackLoggerPlugin;
@@ -15,5 +16,7 @@ pub use lua::LuaPlugin;
 #[allow(unused_imports)]
 pub use manifest::PluginManifest;
 pub use manager::PluginManager;
+#[allow(unused_imports)]
+pub use storage::PluginStorage;
 #[allow(unused_imports)]
 pub use traits::{Plugin, PluginEvent};

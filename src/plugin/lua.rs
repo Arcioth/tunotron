@@ -1,9 +1,10 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use mlua::{HookTriggers, Lua, LuaOptions, LuaSerdeExt, StdLib, Table, Value, VmState};
 use crate::action::{Action, Capability};
 use super::manifest::PluginManifest;
+use super::storage::PluginStorage;
 use super::traits::{Plugin, PluginEvent};
 
 /// Maximum VM instructions allowed per callback (~1-2ms of CPU time).
@@ -15,23 +16,49 @@ pub struct LuaPlugin {
     pub manifest: PluginManifest,
     lua: Lua,
     instruction_counter: Arc<AtomicU32>,
+    storage: Arc<Mutex<PluginStorage>>,
 }
 
 impl LuaPlugin {
     pub fn from_file(path: &Path, music_root: Option<&Path>) -> Result<Self, String> {
+        Self::from_file_with_data(path, music_root, None)
+    }
+
+    pub fn from_file_with_data(
+        path: &Path,
+        music_root: Option<&Path>,
+        data_root: Option<&Path>,
+    ) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read Lua plugin at {}: {}", path.display(), e))?;
-        Self::from_script_with_root(&content, path.to_string_lossy().as_ref(), music_root)
+        Self::from_script_with_root_and_data(&content, path.to_string_lossy().as_ref(), music_root, data_root)
     }
 
     pub fn from_script(script: &str, chunk_name: &str) -> Result<Self, String> {
-        Self::from_script_with_root(script, chunk_name, None)
+        Self::from_script_with_root_and_data(script, chunk_name, None, None)
+    }
+
+    pub fn from_script_with_data(
+        script: &str,
+        chunk_name: &str,
+        data_root: Option<&Path>,
+    ) -> Result<Self, String> {
+        Self::from_script_with_root_and_data(script, chunk_name, None, data_root)
     }
 
     pub fn from_script_with_root(
         script: &str,
         chunk_name: &str,
         music_root: Option<&Path>,
+    ) -> Result<Self, String> {
+        Self::from_script_with_root_and_data(script, chunk_name, music_root, None)
+    }
+
+    pub fn from_script_with_root_and_data(
+        script: &str,
+        chunk_name: &str,
+        music_root: Option<&Path>,
+        data_root: Option<&Path>,
     ) -> Result<Self, String> {
         // 1. Sandbox setup: initialize with only safe standard libraries (table, string, utf8, math).
         // Strips dangerous host process controls and modules by construction:
@@ -112,9 +139,12 @@ impl LuaPlugin {
             manifest = manifest.with_api_version(av);
         }
 
-        // 6. Attach capability-gated host APIs (e.g. jailed filesystem reader, desktop notifications)
+        // 6. Attach capability-gated host APIs (e.g. jailed filesystem reader, desktop notifications, persistent state)
         attach_jailed_fs_api(&lua, &manifest, music_root)?;
         attach_notify_api(&lua, &manifest)?;
+
+        let storage = Arc::new(Mutex::new(PluginStorage::new(&manifest.id, data_root)));
+        attach_state_api(&lua, &manifest, Arc::clone(&storage))?;
 
         // Store plugin table in Lua registry so we can retrieve its callbacks
         let _ = lua.set_named_registry_value("__tunotron_plugin_table", plugin_tbl);
@@ -123,6 +153,7 @@ impl LuaPlugin {
             manifest,
             lua,
             instruction_counter,
+            storage,
         })
     }
 
@@ -383,6 +414,105 @@ fn attach_notify_api(lua: &Lua, manifest: &PluginManifest) -> Result<(), String>
     Ok(())
 }
 
+fn attach_state_api(
+    lua: &Lua,
+    manifest: &PluginManifest,
+    storage: Arc<Mutex<PluginStorage>>,
+) -> Result<(), String> {
+    let globals = lua.globals();
+    let tunotron_tbl: Table = globals.get("tunotron").map_err(|e| e.to_string())?;
+
+    let has_storage_cap = manifest.capabilities.contains(&Capability::PersistentStorage);
+
+    let state_tbl = lua.create_table().map_err(|e| e.to_string())?;
+
+    // tunotron.state.get(key, default)
+    let s_get = storage.clone();
+    let get_fn = lua
+        .create_function(move |lua, (key, default): (String, Option<Value>)| {
+            if !has_storage_cap {
+                return Ok((Value::Nil, Some("Permission denied: missing Capability::PersistentStorage".to_string())));
+            }
+            let lock = s_get.lock().map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+            if let Some(val) = lock.get(&key) {
+                let lua_val = lua.to_value(val)?;
+                Ok((lua_val, None))
+            } else {
+                Ok((default.unwrap_or(Value::Nil), None))
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    // tunotron.state.set(key, val)
+    let s_set = storage.clone();
+    let set_fn = lua
+        .create_function(move |lua, (key, val): (String, Value)| {
+            if !has_storage_cap {
+                return Ok((false, Some("Permission denied: missing Capability::PersistentStorage".to_string())));
+            }
+            let json_val: serde_json::Value = match lua.from_value(val) {
+                Ok(v) => v,
+                Err(e) => return Ok((false, Some(format!("Invalid state payload: must be JSON serializable ({})", e)))),
+            };
+            let mut lock = s_set.lock().map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+            match lock.set(key, json_val) {
+                Ok(()) => Ok((true, None)),
+                Err(e) => Ok((false, Some(e))),
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    // tunotron.state.del(key)
+    let s_del = storage.clone();
+    let del_fn = lua
+        .create_function(move |_lua, key: String| {
+            if !has_storage_cap {
+                return Ok((false, Some("Permission denied: missing Capability::PersistentStorage".to_string())));
+            }
+            let mut lock = s_del.lock().map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+            let existed = lock.del(&key);
+            Ok((existed, None))
+        })
+        .map_err(|e| e.to_string())?;
+
+    // tunotron.state.all()
+    let s_all = storage.clone();
+    let all_fn = lua
+        .create_function(move |lua, ()| {
+            if !has_storage_cap {
+                return Ok((Value::Nil, Some("Permission denied: missing Capability::PersistentStorage".to_string())));
+            }
+            let lock = s_all.lock().map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+            let lua_val = lua.to_value(lock.all())?;
+            Ok((lua_val, None))
+        })
+        .map_err(|e| e.to_string())?;
+
+    // tunotron.state.save()
+    let s_save = storage.clone();
+    let save_fn = lua
+        .create_function(move |_lua, ()| {
+            if !has_storage_cap {
+                return Ok((false, Some("Permission denied: missing Capability::PersistentStorage".to_string())));
+            }
+            let mut lock = s_save.lock().map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+            match lock.flush() {
+                Ok(()) => Ok((true, None)),
+                Err(e) => Ok((false, Some(e))),
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    let _ = state_tbl.set("get", get_fn);
+    let _ = state_tbl.set("set", set_fn);
+    let _ = state_tbl.set("del", del_fn);
+    let _ = state_tbl.set("all", all_fn);
+    let _ = state_tbl.set("save", save_fn);
+
+    tunotron_tbl.set("state", state_tbl).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn parse_actions_from_value(val: Value) -> Vec<Action> {
     match val {
         Value::Table(ref tbl) => {
@@ -581,6 +711,15 @@ impl Plugin for LuaPlugin {
             if let Ok(on_unload_fn) = plugin_tbl.get::<mlua::Function>("on_unload") {
                 let _ = on_unload_fn.call::<()>(());
             }
+        }
+        if let Ok(mut storage) = self.storage.lock() {
+            let _ = storage.flush();
+        }
+    }
+
+    fn flush_state(&mut self) {
+        if let Ok(mut storage) = self.storage.lock() {
+            let _ = storage.flush();
         }
     }
 }
@@ -1169,4 +1308,138 @@ mod tests {
         assert!(actions.is_empty(), "Aborted script must return no actions");
     }
 
+    #[test]
+    fn test_lua_plugin_persistent_storage_roundtrip() {
+        let temp_dir = std::env::temp_dir().join(format!("tunotron_lua_state_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        let script = r#"
+            local p = {}
+            p.manifest = {
+                id = "org.tunotron.statedemo",
+                capabilities = { "PersistentStorage" }
+            }
+            function p.on_action(name, payload)
+                if name == "save" then
+                    tunotron.state.set("user_volume", 85)
+                    tunotron.state.set("dark_mode", true)
+                    tunotron.state.set("nested", { eq = { bass = 5, treble = 2 } })
+                    tunotron.state.save()
+                    return "ToggleHelp"
+                elseif name == "load" then
+                    local vol = tunotron.state.get("user_volume", 50)
+                    local dark = tunotron.state.get("dark_mode", false)
+                    local nested = tunotron.state.get("nested", {})
+                    if vol == 85 and dark == true and nested.eq.bass == 5 then
+                        return "ToggleHelp"
+                    end
+                end
+                return nil
+            end
+            return p
+        "#;
+
+        // 1. First instance writes state and flushes
+        {
+            let mut plugin1 = LuaPlugin::from_script_with_data(script, "statedemo.lua", Some(&temp_dir)).unwrap();
+            let actions = plugin1.on_action("save", &serde_json::json!({}));
+            assert_eq!(actions, vec![Action::ToggleHelp]);
+        }
+
+        // 2. Second fresh instance reads state back from disk
+        {
+            let mut plugin2 = LuaPlugin::from_script_with_data(script, "statedemo.lua", Some(&temp_dir)).unwrap();
+            let actions = plugin2.on_action("load", &serde_json::json!({}));
+            assert_eq!(actions, vec![Action::ToggleHelp], "State must persist across instances");
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_lua_plugin_persistent_storage_missing_capability() {
+        let temp_dir = std::env::temp_dir().join(format!("tunotron_lua_state_nocap_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        let script = r#"
+            local p = {}
+            p.manifest = {
+                id = "org.tunotron.nostorage",
+                capabilities = {} -- Missing PersistentStorage!
+            }
+            function p.on_action(name, payload)
+                local ok, err = tunotron.state.set("key", "val")
+                if not ok and string.find(err, "missing Capability::PersistentStorage") then
+                    return "ToggleHelp"
+                end
+                return nil
+            end
+            return p
+        "#;
+
+        let mut plugin = LuaPlugin::from_script_with_data(script, "nostorage.lua", Some(&temp_dir)).unwrap();
+        let actions = plugin.on_action("check", &serde_json::json!({}));
+        assert_eq!(actions, vec![Action::ToggleHelp], "Missing capability must be rejected");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_lua_plugin_persistent_storage_quota_rejection() {
+        let temp_dir = std::env::temp_dir().join(format!("tunotron_lua_state_quota_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        let script = r#"
+            local p = {}
+            p.manifest = {
+                id = "org.tunotron.quota",
+                capabilities = { "PersistentStorage" }
+            }
+            function p.on_action(name, payload)
+                -- 300 KB payload exceeds 256 KB quota
+                local huge = string.rep("x", 300 * 1024)
+                local ok, err = tunotron.state.set("huge", huge)
+                if not ok and string.find(err, "quota exceeded") then
+                    return "ToggleHelp"
+                end
+                return nil
+            end
+            return p
+        "#;
+
+        let mut plugin = LuaPlugin::from_script_with_data(script, "quota.lua", Some(&temp_dir)).unwrap();
+        let actions = plugin.on_action("check", &serde_json::json!({}));
+        assert_eq!(actions, vec![Action::ToggleHelp], "Payload exceeding 256KB must be rejected");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_lua_plugin_persistent_storage_unserializable_rejection() {
+        let temp_dir = std::env::temp_dir().join(format!("tunotron_lua_state_unserializable_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        let script = r#"
+            local p = {}
+            p.manifest = {
+                id = "org.tunotron.unserializable",
+                capabilities = { "PersistentStorage" }
+            }
+            function p.on_action(name, payload)
+                -- Attempt to store a Lua function (non-JSON)
+                local ok, err = tunotron.state.set("fn", function() return 1 end)
+                if not ok and string.find(err, "must be JSON serializable") then
+                    return "ToggleHelp"
+                end
+                return nil
+            end
+            return p
+        "#;
+
+        let mut plugin = LuaPlugin::from_script_with_data(script, "unserializable.lua", Some(&temp_dir)).unwrap();
+        let actions = plugin.on_action("check", &serde_json::json!({}));
+        assert_eq!(actions, vec![Action::ToggleHelp], "Functions/userdata must be rejected by serializer");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }

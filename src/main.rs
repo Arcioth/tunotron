@@ -347,6 +347,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    plugin_mgr.unload_all();
     let _ = cmd_tx.try_send(MpvCommand::Quit);
     info!("Tunotron exiting gracefully");
     Ok(())

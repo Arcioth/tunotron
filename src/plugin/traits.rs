@@ -45,4 +45,6 @@ pub trait Plugin: Send {
     }
 
     fn on_unload(&mut self) {}
+
+    fn flush_state(&mut self) {}
 }
